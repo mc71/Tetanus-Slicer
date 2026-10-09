@@ -5,6 +5,7 @@ mod geom;
 mod gcode;
 mod infill;
 mod perimeter;
+mod profile;
 mod slicer;
 mod stl;
 mod support;
@@ -22,10 +23,11 @@ use rayon::prelude::*;
 
 use adaptive::AdaptiveLayers;
 use bvh::TriangleIntervalIndex;
-use gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
+use gcode::{GCodeWriter, ProcessedLayer};
 use geom::Polygon2;
 use infill::{InfillGenerator, InfillPattern};
 use perimeter::{PerimeterGenerator, SeamPosition};
+use profile::{ConfigOverrides, ProfileManager};
 use slicer::{ContourRole, Slicer};
 use stl::Mesh;
 use support::{SupportConfig, SupportGenerator};
@@ -46,66 +48,116 @@ fn main() {
         return;
     }
 
+    if args.iter().any(|a| a == "--list-profiles" || a == "--profiles") {
+        let mgr = ProfileManager::new();
+        println!("============================================================");
+        println!("            Tetanus-Slicer Available Profiles               ");
+        println!("============================================================");
+        println!("\n[Machines]:");
+        let mut machines: Vec<_> = mgr.machines.values().collect();
+        machines.sort_by(|a, b| a.name.cmp(&b.name));
+        for m in machines {
+            println!("  • {:<20} id: {:<18} Bed: {:.0}x{:.0}x{:.0}mm", m.name, m.id, m.bed_size[0], m.bed_size[1], m.bed_size[2]);
+        }
+        println!("\n[Materials]:");
+        let mut materials: Vec<_> = mgr.materials.values().collect();
+        materials.sort_by(|a, b| a.name.cmp(&b.name));
+        for mat in materials {
+            println!("  • {:<20} id: {:<10} Nozzle: {}°C  Bed: {}°C  Density: {:.2}g/cm³",
+                mat.name, mat.id, mat.nozzle_temp.unwrap_or(210), mat.bed_temp.unwrap_or(60), mat.density.unwrap_or(1.24));
+        }
+        println!("\n[Quality Processes]:");
+        let mut processes: Vec<_> = mgr.processes.values().collect();
+        processes.sort_by(|a, b| a.name.cmp(&b.name));
+        for p in processes {
+            println!("  • {:<20} id: {:<15} Layer: {:.2}mm  Infill: {:.0}%",
+                p.name, p.id, p.layer_height.unwrap_or(0.2), p.infill_density.unwrap_or(0.20) * 100.0);
+        }
+        println!("============================================================");
+        return;
+    }
+
     let mut input_paths: Vec<String> = Vec::new();
     let mut custom_output: Option<String> = None;
-    let mut config = PrintConfig::default();
-    let mut infill_density = 0.20; // 20%
+    let mut machine_arg: Option<String> = None;
+    let mut material_arg: Option<String> = None;
+    let mut process_arg: Option<String> = None;
+    let mut overrides = ConfigOverrides::default();
     let mut perimeter_count = 2;
+    let mut infill_density = 0.20;
 
     // Arg parser
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-m" | "--machine" if i + 1 < args.len() => {
+                machine_arg = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--material" | "--filament" if i + 1 < args.len() => {
+                material_arg = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--process" if i + 1 < args.len() => {
+                process_arg = Some(args[i + 1].clone());
+                i += 1;
+            }
             "--layer-height" if i + 1 < args.len() => {
-                config.layer_height = args[i + 1].parse().unwrap_or(0.2);
+                overrides.layer_height = Some(args[i + 1].parse().unwrap_or(0.2));
                 i += 1;
             }
             "--infill" if i + 1 < args.len() => {
                 infill_density = args[i + 1].parse().unwrap_or(0.20);
+                overrides.infill_density = Some(infill_density);
                 i += 1;
             }
             "--perimeters" if i + 1 < args.len() => {
                 perimeter_count = args[i + 1].parse().unwrap_or(2);
+                overrides.perimeters = Some(perimeter_count);
+                i += 1;
+            }
+            "--speed" if i + 1 < args.len() => {
+                overrides.print_speed = Some(args[i + 1].parse().unwrap_or(50.0));
+                i += 1;
+            }
+            "--temp" | "--nozzle-temp" if i + 1 < args.len() => {
+                overrides.nozzle_temp = Some(args[i + 1].parse().unwrap_or(210));
+                i += 1;
+            }
+            "--bed-temp" if i + 1 < args.len() => {
+                overrides.bed_temp = Some(args[i + 1].parse().unwrap_or(60));
                 i += 1;
             }
             "--infill-pattern" if i + 1 < args.len() => {
-                config.infill_pattern = match args[i + 1].to_lowercase().as_str() {
+                overrides.infill_pattern = Some(match args[i + 1].to_lowercase().as_str() {
                     "grid" => InfillPattern::Grid,
                     "triangles" | "triangle" => InfillPattern::Triangles,
                     "gyroid" => InfillPattern::Gyroid,
                     _ => InfillPattern::Rectilinear,
-                };
+                });
                 i += 1;
             }
             "--support" | "--supports" => {
-                config.support_enabled = true;
+                overrides.support_enabled = Some(true);
             }
             "--support-angle" if i + 1 < args.len() => {
-                config.support_angle = args[i + 1].parse().unwrap_or(45.0);
+                overrides.support_angle = Some(args[i + 1].parse().unwrap_or(45.0));
                 i += 1;
             }
             "--seam" if i + 1 < args.len() => {
-                config.seam_position = match args[i + 1].to_lowercase().as_str() {
+                overrides.seam_position = Some(match args[i + 1].to_lowercase().as_str() {
                     "rear" => SeamPosition::Rear,
                     "nearest" => SeamPosition::Nearest,
                     "random" => SeamPosition::Random,
                     _ => SeamPosition::Aligned,
-                };
+                });
                 i += 1;
             }
             "--adaptive" | "--adaptive-layers" => {
-                config.adaptive_layers = true;
-            }
-            "--adaptive-min" if i + 1 < args.len() => {
-                config.adaptive_layer_min = args[i + 1].parse().unwrap_or(0.08);
-                i += 1;
-            }
-            "--adaptive-max" if i + 1 < args.len() => {
-                config.adaptive_layer_max = args[i + 1].parse().unwrap_or(0.28);
-                i += 1;
+                overrides.adaptive_layers = Some(true);
             }
             "--vase" | "--spiral-vase" => {
-                config.spiral_vase = true;
+                overrides.spiral_vase = Some(true);
             }
             "-o" | "--output" if i + 1 < args.len() => {
                 custom_output = Some(args[i + 1].clone());
@@ -123,6 +175,14 @@ fn main() {
         i += 1;
     }
 
+    let profile_mgr = ProfileManager::new();
+    let config = profile_mgr.cascade(
+        machine_arg.as_deref(),
+        material_arg.as_deref(),
+        process_arg.as_deref(),
+        &overrides,
+    );
+
     if input_paths.is_empty() {
         println!("No STL input provided. Creating 'cube.stl' (20x20x20mm test cube)...");
         generate_test_cube_stl("cube.stl").expect("Failed to create test cube");
@@ -139,6 +199,8 @@ fn main() {
     println!("============================================================");
     println!("Input Files:     {} model(s): {:?}", input_paths.len(), input_paths);
     println!("Output G-code:   {}", output_path);
+    println!("Machine Profile: {} (Bed: {:.0} x {:.0} x {:.0} mm)", config.machine_name, config.bed_x, config.bed_y, config.bed_z);
+    println!("Material:        {} (Nozzle: {}°C, Bed: {}°C, Density: {:.2} g/cm³)", config.material_name, config.nozzle_temp, config.bed_temp, config.filament_density);
     println!("Layer Height:    {:.3} mm {}", config.layer_height, if config.adaptive_layers { format!("(Adaptive [{:.2}-{:.2} mm])", config.adaptive_layer_min, config.adaptive_layer_max) } else { "".to_string() });
     if config.spiral_vase {
         println!("Spiral Vase:     ENABLED (Seamless Continuous Single-Wall Ascent)");
@@ -164,15 +226,18 @@ fn main() {
         }
     }
 
+    let bed_center_x = config.bed_x * 0.5;
+    let bed_center_y = config.bed_y * 0.5;
+
     let mesh = if meshes.len() > 1 {
         println!("[1/4] Arranging {} models with auto-plater...", meshes.len());
         Mesh::auto_arrange(&mut meshes, 10.0);
         let mut combined = Mesh::combine(&meshes);
-        combined.center_on_bed(110.0, 110.0);
+        combined.center_on_bed(bed_center_x, bed_center_y);
         combined
     } else {
         let mut m = meshes.remove(0);
-        m.center_on_bed(110.0, 110.0);
+        m.center_on_bed(bed_center_x, bed_center_y);
         m
     };
 
@@ -329,7 +394,7 @@ fn main() {
                     *p = PerimeterGenerator::align_seam(
                         p,
                         if is_spiral { SeamPosition::Nearest } else { config.seam_position },
-                        crate::geom::Point2::new(110.0, 110.0),
+                        crate::geom::Point2::new(bed_center_x, bed_center_y),
                         layer_idx,
                         c_idx,
                     );

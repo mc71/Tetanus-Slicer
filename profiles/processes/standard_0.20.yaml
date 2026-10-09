@@ -1,0 +1,13 @@
+name: "0.20mm Standard"
+id: "standard_0.20"
+layer_height: 0.20
+line_width: 0.45
+perimeters: 2
+top_solid_layers: 4
+bottom_solid_layers: 4
+infill_pattern: "rectilinear"
+infill_density: 0.20
+print_speed_perimeter: 60.0
+print_speed_infill: 100.0
+first_layer_speed: 30.0
+seam_position: "aligned"

@@ -1,0 +1,11 @@
+name: "Generic PLA"
+id: "pla"
+material_type: "PLA"
+density: 1.24
+nozzle_temp: 210
+bed_temp: 60
+fan_speed: 255
+fan_below_layer: 1
+flow_ratio: 1.00
+retract_dist: 0.8
+max_print_speed: 250.0

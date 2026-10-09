@@ -1,0 +1,13 @@
+name: "0.28mm Draft Speed"
+id: "draft_0.28"
+layer_height: 0.28
+line_width: 0.50
+perimeters: 2
+top_solid_layers: 3
+bottom_solid_layers: 3
+infill_pattern: "grid"
+infill_density: 0.15
+print_speed_perimeter: 80.0
+print_speed_infill: 140.0
+first_layer_speed: 35.0
+seam_position: "nearest"

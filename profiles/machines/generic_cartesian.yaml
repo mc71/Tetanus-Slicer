@@ -1,0 +1,40 @@
+name: "Generic Cartesian (Ender 3 style)"
+id: "generic_cartesian"
+manufacturer: "Generic"
+bed_size: [220.0, 220.0, 250.0]
+nozzle_diameter: 0.40
+max_print_speed: 100.0
+travel_speed: 150.0
+acceleration: 1200.0
+retract_dist: 5.0
+retract_speed: 45.0
+z_hop: 0.2
+start_gcode: |
+  ; --- Generic Cartesian Start Sequence ---
+  G21 ; metric values
+  G90 ; absolute positioning
+  M83 ; relative extrusion
+  M104 S{nozzle_temp} ; set nozzle temp
+  M140 S{bed_temp} ; set bed temp
+  M190 S{bed_temp} ; wait for bed temp
+  M109 S{nozzle_temp} ; wait for nozzle temp
+  G28 ; home all axes
+  G92 E0
+  ; Prime line
+  G1 Z0.3 F1000
+  G1 X10.0 Y10.0 F9000
+  G1 X100.0 E8.0 F1200
+  G1 X100.0 Y10.5 F9000
+  G1 X10.0 E16.0 F1200
+  G92 E0
+end_gcode: |
+  ; --- Generic Cartesian End Sequence ---
+  M104 S0 ; turn off nozzle
+  M140 S0 ; turn off bed
+  M107 ; turn off fan
+  G91 ; relative
+  G1 E-2.0 F1800 ; retract
+  G1 Z10.0 F3000 ; lift Z
+  G90 ; absolute
+  G1 X0.0 Y200.0 F9000 ; present print
+  M84 ; disable motors

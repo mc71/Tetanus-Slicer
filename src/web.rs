@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Response, Server, StatusCode};
 
 use crate::bvh::TriangleIntervalIndex;
-use crate::gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
+use crate::gcode::{GCodeWriter, ProcessedLayer};
 use crate::geom::Polygon2;
 use crate::infill::{InfillGenerator, InfillPattern};
 use crate::perimeter::PerimeterGenerator;
@@ -59,6 +59,12 @@ pub struct SliceRequest {
     pub adaptive_layer_max: f64,
     #[serde(default)]
     pub spiral_vase: bool,
+    #[serde(default)]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub material: Option<String>,
+    #[serde(default)]
+    pub process: Option<String>,
 }
 
 fn default_layer_height() -> f64 { 0.20 }
@@ -88,6 +94,9 @@ pub struct SliceResponse {
     pub layers: Vec<WebLayer>,
     pub gcode: String,
     pub spiral_vase: bool,
+    pub bed_size: [f64; 3],
+    pub machine_name: String,
+    pub material_name: String,
 }
 
 #[derive(Serialize)]
@@ -117,6 +126,20 @@ pub struct SliceStats {
     pub print_time_formatted: String,
     pub filament_meters: f64,
     pub filament_grams: f64,
+}
+
+fn make_error_response(err: String) -> SliceResponse {
+    SliceResponse {
+        success: false,
+        error: Some(err),
+        stats: None,
+        layers: Vec::new(),
+        gcode: String::new(),
+        spiral_vase: false,
+        bed_size: [220.0, 220.0, 250.0],
+        machine_name: String::new(),
+        material_name: String::new(),
+    }
 }
 
 pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
@@ -154,17 +177,33 @@ pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     .with_header(header_cors);
                 let _ = request.respond(response);
             }
+            (&tiny_http::Method::Get, "/api/profiles") => {
+                let mgr = crate::profile::ProfileManager::new();
+                let mut machines: Vec<_> = mgr.machines.values().cloned().collect();
+                machines.sort_by(|a, b| a.name.cmp(&b.name));
+                let mut materials: Vec<_> = mgr.materials.values().cloned().collect();
+                materials.sort_by(|a, b| a.name.cmp(&b.name));
+                let mut processes: Vec<_> = mgr.processes.values().cloned().collect();
+                processes.sort_by(|a, b| a.name.cmp(&b.name));
+
+                #[derive(Serialize)]
+                struct ProfilesResponse {
+                    machines: Vec<crate::profile::MachineProfile>,
+                    materials: Vec<crate::profile::MaterialProfile>,
+                    processes: Vec<crate::profile::ProcessProfile>,
+                }
+
+                let resp_data = ProfilesResponse { machines, materials, processes };
+                let json_str = serde_json::to_string(&resp_data).unwrap();
+                let response = Response::from_string(json_str)
+                    .with_header(header_json)
+                    .with_header(header_cors);
+                let _ = request.respond(response);
+            }
             (&tiny_http::Method::Post, "/api/slice") => {
                 let mut body = String::new();
                 if let Err(e) = request.as_reader().read_to_string(&mut body) {
-                    let err_resp = serde_json::to_string(&SliceResponse {
-                        success: false,
-                        error: Some(format!("Failed to read request body: {}", e)),
-                        stats: None,
-                        layers: Vec::new(),
-                        gcode: String::new(),
-                        spiral_vase: false,
-                    }).unwrap();
+                    let err_resp = serde_json::to_string(&make_error_response(format!("Failed to read request body: {}", e))).unwrap();
                     let response = Response::from_string(err_resp)
                         .with_status_code(StatusCode(400))
                         .with_header(header_json)
@@ -176,14 +215,7 @@ pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 let req_payload: SliceRequest = match serde_json::from_str(&body) {
                     Ok(p) => p,
                     Err(e) => {
-                        let err_resp = serde_json::to_string(&SliceResponse {
-                            success: false,
-                            error: Some(format!("Invalid JSON: {}", e)),
-                            stats: None,
-                            layers: Vec::new(),
-                            gcode: String::new(),
-                            spiral_vase: false,
-                        }).unwrap();
+                        let err_resp = serde_json::to_string(&make_error_response(format!("Invalid JSON: {}", e))).unwrap();
                         let response = Response::from_string(err_resp)
                             .with_status_code(StatusCode(400))
                             .with_header(header_json)
@@ -216,52 +248,61 @@ pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     let t_start = Instant::now();
 
-    // 1. Decode bytes (STL or 3MF)
+    // 1. Resolve cascading config (Machine -> Material -> Process -> User Overrides)
+    let mgr = crate::profile::ProfileManager::new();
+    let overrides = crate::profile::ConfigOverrides {
+        nozzle_temp: Some(req.nozzle_temp),
+        bed_temp: Some(req.bed_temp),
+        layer_height: Some(req.layer_height),
+        line_width: Some(0.45),
+        perimeters: Some(req.perimeters),
+        infill_density: Some(req.infill_density),
+        infill_pattern: Some(req.infill_pattern),
+        print_speed: Some(req.print_speed),
+        top_solid_layers: Some(req.top_solid_layers),
+        bottom_solid_layers: Some(req.bottom_solid_layers),
+        skirt_loops: Some(req.skirt_loops),
+        brim_width: Some(req.brim_width),
+        z_hop: Some(req.z_hop),
+        fan_speed: Some(req.fan_speed),
+        support_enabled: Some(req.support_enabled),
+        support_angle: Some(req.support_angle),
+        seam_position: Some(req.seam_position),
+        adaptive_layers: Some(req.adaptive_layers),
+        spiral_vase: Some(req.spiral_vase),
+    };
+
+    let config = mgr.cascade(
+        req.machine.as_deref(),
+        req.material.as_deref(),
+        req.process.as_deref(),
+        &overrides,
+    );
+
+    let bed_center_x = config.bed_x * 0.5;
+    let bed_center_y = config.bed_y * 0.5;
+
+    // 2. Decode bytes (STL or 3MF)
     let raw_bytes = if let Some(ref b64) = req.stl_base64 {
         match BASE64_STANDARD.decode(b64.trim()) {
             Ok(b) => b,
-            Err(e) => {
-                return SliceResponse {
-                    success: false,
-                    error: Some(format!("Base64 decoding failed: {}", e)),
-                    stats: None,
-                    layers: Vec::new(),
-                    gcode: String::new(),
-                    spiral_vase: false,
-                };
-            }
+            Err(e) => return make_error_response(format!("Base64 decoding failed: {}", e)),
         }
     } else {
         create_cube_stl_bytes()
     };
 
-    // 2. Parse Mesh (supports both STL and 3MF)
+    // 3. Parse Mesh (supports both STL and 3MF)
     let mesh = match Mesh::from_slice(&raw_bytes) {
         Ok(m) => m,
-        Err(e) => {
-            return SliceResponse {
-                success: false,
-                error: Some(format!("Failed to parse model: {}", e)),
-                stats: None,
-                layers: Vec::new(),
-                gcode: String::new(),
-                spiral_vase: false,
-            };
-        }
+        Err(e) => return make_error_response(format!("Failed to parse model: {}", e)),
     };
 
     if mesh.triangles.is_empty() {
-        return SliceResponse {
-            success: false,
-            error: Some("Mesh contains 0 triangles".to_string()),
-            stats: None,
-            layers: Vec::new(),
-            gcode: String::new(),
-            spiral_vase: false,
-        };
+        return make_error_response("Mesh contains 0 triangles".to_string());
     }
 
-    // 3. Multi-object Plater & Centering
+    // 4. Multi-object Plater & Machine Bed Centering
     let mut all_meshes = vec![mesh];
     for add_b64 in &req.additional_models_base64 {
         if let Ok(b) = BASE64_STANDARD.decode(add_b64.trim()) {
@@ -276,11 +317,11 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     let mesh = if all_meshes.len() > 1 {
         Mesh::auto_arrange(&mut all_meshes, 10.0);
         let mut combined = Mesh::combine(&all_meshes);
-        combined.center_on_bed(110.0, 110.0);
+        combined.center_on_bed(bed_center_x, bed_center_y);
         combined
     } else {
         let mut m = all_meshes.remove(0);
-        m.center_on_bed(110.0, 110.0);
+        m.center_on_bed(bed_center_x, bed_center_y);
         m
     };
 
@@ -288,10 +329,10 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     let dim_y = mesh.max_bound.y - mesh.min_bound.y;
     let dim_z = mesh.max_bound.z - mesh.min_bound.z;
 
-    // 4. Build Spatial Index
+    // 5. Build Spatial Index
     let bvh = TriangleIntervalIndex::build(&mesh.triangles);
 
-    // 5. Slice Layers in Parallel (Variable or Uniform)
+    // 6. Slice Layers in Parallel (Variable or Uniform)
     let (layer_specs, layer_count) = if req.adaptive_layers {
         let specs = crate::adaptive::AdaptiveLayers::compute_layer_heights(
             &bvh,
@@ -310,37 +351,6 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             .map(|i| (mesh.min_bound.z + (i as f64 + 0.5) * layer_height, layer_height))
             .collect();
         (specs, count)
-    };
-
-    let config = PrintConfig {
-        nozzle_temp: req.nozzle_temp,
-        bed_temp: req.bed_temp,
-        layer_height: req.layer_height,
-        line_width: 0.45,
-        filament_diameter: 1.75,
-        print_speed_perimeter: req.print_speed * 0.8,
-        print_speed_infill: req.print_speed,
-        first_layer_speed: (req.print_speed * 0.5).max(15.0),
-        travel_speed: 150.0,
-        retract_dist: 0.8,
-        retract_speed: 35.0,
-        z_hop: req.z_hop,
-        top_solid_layers: req.top_solid_layers,
-        bottom_solid_layers: req.bottom_solid_layers,
-        skirt_loops: req.skirt_loops,
-        skirt_distance: 4.0,
-        brim_width: req.brim_width,
-        fan_speed: req.fan_speed,
-        fan_below_layer: 1,
-        infill_pattern: req.infill_pattern,
-        support_enabled: req.support_enabled,
-        support_angle: req.support_angle,
-        support_density: 0.15,
-        seam_position: req.seam_position,
-        adaptive_layers: req.adaptive_layers,
-        adaptive_layer_min: req.adaptive_layer_min,
-        adaptive_layer_max: req.adaptive_layer_max,
-        spiral_vase: req.spiral_vase,
     };
 
     // Step 5a: Slicing layer contours in parallel
@@ -449,7 +459,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                     *p = PerimeterGenerator::align_seam(
                         p,
                         if is_spiral { crate::perimeter::SeamPosition::Nearest } else { config.seam_position },
-                        crate::geom::Point2::new(110.0, 110.0),
+                        crate::geom::Point2::new(bed_center_x, bed_center_y),
                         layer_idx,
                         c_idx,
                     );
@@ -626,6 +636,9 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         layers: web_layers,
         gcode: gcode_str,
         spiral_vase: req.spiral_vase,
+        bed_size: [config.bed_x, config.bed_y, config.bed_z],
+        machine_name: config.machine_name.clone(),
+        material_name: config.material_name.clone(),
     }
 }
 

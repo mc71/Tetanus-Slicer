@@ -1,0 +1,13 @@
+name: "0.12mm High Detail"
+id: "fine_0.12"
+layer_height: 0.12
+line_width: 0.40
+perimeters: 3
+top_solid_layers: 6
+bottom_solid_layers: 5
+infill_pattern: "gyroid"
+infill_density: 0.25
+print_speed_perimeter: 45.0
+print_speed_infill: 75.0
+first_layer_speed: 20.0
+seam_position: "aligned"

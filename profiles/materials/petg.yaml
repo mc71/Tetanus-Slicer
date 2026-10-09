@@ -1,0 +1,11 @@
+name: "Generic PETG"
+id: "petg"
+material_type: "PETG"
+density: 1.27
+nozzle_temp: 245
+bed_temp: 70
+fan_speed: 128
+fan_below_layer: 3
+flow_ratio: 0.96
+retract_dist: 1.0
+max_print_speed: 160.0

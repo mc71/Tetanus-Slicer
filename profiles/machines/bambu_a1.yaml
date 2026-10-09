@@ -1,0 +1,39 @@
+name: "Bambu Lab A1"
+id: "bambu_a1"
+manufacturer: "Bambu Lab"
+bed_size: [256.0, 256.0, 256.0]
+nozzle_diameter: 0.40
+max_print_speed: 300.0
+travel_speed: 400.0
+acceleration: 10000.0
+retract_dist: 0.8
+retract_speed: 35.0
+z_hop: 0.4
+start_gcode: |
+  ; --- Bambu Lab A1 Start Sequence ---
+  M73 P0 R0
+  G90 ; absolute positioning
+  M83 ; relative extrusion
+  M104 S{nozzle_temp} ; preheat nozzle
+  M140 S{bed_temp} ; heat bed
+  G28 ; home all axes
+  M190 S{bed_temp} ; wait for bed temp
+  M109 S{nozzle_temp} ; wait for nozzle temp
+  ; Bambu A1 Purge Line
+  G1 Z0.3 F1200
+  G1 X18.0 Y10.0 F18000
+  G1 X120.0 E12.0 F1500
+  G1 X120.0 Y10.8 F18000
+  G1 X18.0 E24.0 F1500
+  G92 E0
+end_gcode: |
+  ; --- Bambu Lab A1 End Sequence ---
+  M104 S0 ; turn off nozzle
+  M140 S0 ; turn off bed
+  M107 ; turn off fan
+  G91 ; relative coordinates
+  G1 E-1.5 F1800 ; retract
+  G1 Z15.0 F3000 ; lift Z
+  G90 ; absolute coordinates
+  G1 X128.0 Y250.0 F18000 ; present print
+  M84 ; disable stepper motors

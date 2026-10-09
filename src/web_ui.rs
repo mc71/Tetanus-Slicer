@@ -160,6 +160,22 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <div class="row"><span class="label">Triangles:</span><span class="val" id="info-triangles">-</span></div>
     </div>
 
+    <div class="section-title">Machine & Material</div>
+    <div class="field">
+      <div class="field-header"><label>3D Printer</label></div>
+      <select id="inp-machine" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+        <option value="bambu_a1" selected>Bambu Lab A1 (256×256 mm)</option>
+        <option value="generic_cartesian">Generic Cartesian (220×220 mm)</option>
+      </select>
+    </div>
+    <div class="field">
+      <div class="field-header"><label>Filament Material</label></div>
+      <select id="inp-material" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+        <option value="pla" selected>Generic PLA (210°C / 60°C)</option>
+        <option value="petg">Generic PETG (245°C / 70°C)</option>
+      </select>
+    </div>
+
     <div class="section-title">Print Quality</div>
     <div class="field">
       <div class="field-header"><label>Layer Height</label><span id="val-layer-height">0.20 mm</span></div>
@@ -324,36 +340,50 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     renderer.shadowMap.enabled = true;
     container.appendChild(renderer.domElement);
 
+    let currentBedX = 256;
+    let currentBedY = 256;
     const controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
-    controls.target.set(110, 110, 20); // Center of 220x220 bed
 
-    // --- Build Plate (220x220mm) ---
+    // --- Dynamic Build Plate ---
     const bedGroup = new THREE.Group();
-    const bedGrid = new THREE.GridHelper(220, 22, 0x475569, 0x1e293b);
-    bedGrid.rotation.x = Math.PI / 2;
-    bedGrid.position.set(110, 110, 0);
-    bedGroup.add(bedGrid);
-
-    // Bed frame outline
-    const bedBoxGeo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(0, 0, 0), new THREE.Vector3(220, 0, 0),
-      new THREE.Vector3(220, 220, 0), new THREE.Vector3(0, 220, 0),
-      new THREE.Vector3(0, 0, 0)
-    ]);
-    const bedBoxMat = new THREE.LineBasicMaterial({ color: 0x64748b, linewidth: 2 });
-    bedGroup.add(new THREE.Line(bedBoxGeo, bedBoxMat));
-
-    // Bed surface plane
-    const bedPlaneGeo = new THREE.PlaneGeometry(220, 220);
-    const bedPlaneMat = new THREE.MeshBasicMaterial({ color: 0x0f172a, transparent: true, opacity: 0.6 });
-    const bedPlane = new THREE.Mesh(bedPlaneGeo, bedPlaneMat);
-    bedPlane.position.set(110, 110, -0.1);
-    bedGroup.add(bedPlane);
-
     scene.add(bedGroup);
     scene.add(toolpathGroup);
+
+    function updateBuildPlate(sizeX = 256, sizeY = 256) {
+      currentBedX = sizeX;
+      currentBedY = sizeY;
+      while (bedGroup.children.length > 0) {
+        const obj = bedGroup.children[0];
+        if (obj.geometry) obj.geometry.dispose();
+        bedGroup.remove(obj);
+      }
+
+      const cx = sizeX * 0.5;
+      const cy = sizeY * 0.5;
+      controls.target.set(cx, cy, 20);
+
+      const bedGrid = new THREE.GridHelper(Math.max(sizeX, sizeY), Math.round(Math.max(sizeX, sizeY) / 10), 0x475569, 0x1e293b);
+      bedGrid.rotation.x = Math.PI / 2;
+      bedGrid.position.set(cx, cy, 0);
+      bedGroup.add(bedGrid);
+
+      const bedBoxGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0), new THREE.Vector3(sizeX, 0, 0),
+        new THREE.Vector3(sizeX, sizeY, 0), new THREE.Vector3(0, sizeY, 0),
+        new THREE.Vector3(0, 0, 0)
+      ]);
+      const bedBoxMat = new THREE.LineBasicMaterial({ color: 0x64748b, linewidth: 2 });
+      bedGroup.add(new THREE.Line(bedBoxGeo, bedBoxMat));
+
+      const bedPlaneGeo = new THREE.PlaneGeometry(sizeX, sizeY);
+      const bedPlaneMat = new THREE.MeshBasicMaterial({ color: 0x0f172a, transparent: true, opacity: 0.6 });
+      const bedPlane = new THREE.Mesh(bedPlaneGeo, bedPlaneMat);
+      bedPlane.position.set(cx, cy, -0.1);
+      bedGroup.add(bedPlane);
+    }
+    updateBuildPlate(256, 256); // default to Bambu Lab A1
 
     // Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -406,6 +436,66 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         document.getElementById('val-fan').innerText = Math.round((parseInt(inpFan.value) / 255) * 100) + '%';
       });
     }
+
+    // Machine & Material Profiles
+    const inpMachine = document.getElementById('inp-machine');
+    if (inpMachine) {
+      inpMachine.addEventListener('change', () => {
+        const val = inpMachine.value;
+        if (val === 'bambu_a1') {
+          updateBuildPlate(256, 256);
+        } else if (val === 'generic_cartesian') {
+          updateBuildPlate(220, 220);
+        }
+      });
+    }
+
+    const inpMaterial = document.getElementById('inp-material');
+    if (inpMaterial) {
+      inpMaterial.addEventListener('change', () => {
+        const val = inpMaterial.value;
+        const inpNozzle = document.getElementById('inp-nozzle');
+        const valNozzle = document.getElementById('val-nozzle');
+        const inpFan = document.getElementById('inp-fan');
+        const valFan = document.getElementById('val-fan');
+        if (val === 'petg') {
+          if (inpNozzle) { inpNozzle.value = 245; valNozzle.innerText = '245°C'; }
+          if (inpFan) { inpFan.value = 128; valFan.innerText = '50%'; }
+        } else if (val === 'pla') {
+          if (inpNozzle) { inpNozzle.value = 210; valNozzle.innerText = '210°C'; }
+          if (inpFan) { inpFan.value = 255; valFan.innerText = '100%'; }
+        }
+      });
+    }
+
+    // Fetch and populate available profiles dynamically
+    fetch('/api/profiles')
+      .then(res => res.json())
+      .then(data => {
+        if (data.machines && data.machines.length > 0 && inpMachine) {
+          const curr = inpMachine.value;
+          inpMachine.innerHTML = '';
+          for (let m of data.machines) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.innerText = `${m.name} (${m.bed_size[0]}×${m.bed_size[1]} mm)`;
+            if (m.id === curr) opt.selected = true;
+            inpMachine.appendChild(opt);
+          }
+        }
+        if (data.materials && data.materials.length > 0 && inpMaterial) {
+          const curr = inpMaterial.value;
+          inpMaterial.innerHTML = '';
+          for (let mat of data.materials) {
+            const opt = document.createElement('option');
+            opt.value = mat.id;
+            opt.innerText = `${mat.name} (${mat.nozzle_temp || 210}°C / ${mat.bed_temp || 60}°C)`;
+            if (mat.id === curr) opt.selected = true;
+            inpMaterial.appendChild(opt);
+          }
+        }
+      })
+      .catch(e => console.warn('Profiles load error:', e));
 
     // --- File Handling (Drop & Browse) ---
     const dropzone = document.getElementById('dropzone');
@@ -487,7 +577,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const centerY = (bb.max.y + bb.min.y) / 2;
       const minZ = bb.min.z;
 
-      geometry.translate(110 - centerX, 110 - centerY, -minZ);
+      geometry.translate(currentBedX * 0.5 - centerX, currentBedY * 0.5 - centerY, -minZ);
 
       const material = new THREE.MeshPhongMaterial({
         color: 0x94a3b8,
@@ -652,6 +742,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         skirt_loops: parseInt(document.getElementById('inp-skirt').value),
         brim_width: parseFloat(document.getElementById('inp-brim').value),
         z_hop: parseFloat(document.getElementById('inp-z-hop').value),
+        machine: document.getElementById('inp-machine') ? document.getElementById('inp-machine').value : 'bambu_a1',
+        material: document.getElementById('inp-material') ? document.getElementById('inp-material').value : 'pla',
         fan_speed: parseInt(document.getElementById('inp-fan').value)
       };
 
@@ -713,8 +805,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       document.getElementById('stat-time').innerText = `${data.stats.elapsed_ms.toFixed(1)} ms`;
       document.getElementById('stat-layers').innerText = data.stats.layer_count;
       document.getElementById('stat-print-time').innerText = data.stats.print_time_formatted || '-';
-      document.getElementById('stat-filament').innerText = `${(data.stats.filament_grams || 0).toFixed(1)}g (${(data.stats.filament_meters || 0).toFixed(1)}m)`;
       document.getElementById('stats-pill').style.display = 'flex';
+
+      // Update build plate size if provided
+      if (data.bed_size && (data.bed_size[0] !== currentBedX || data.bed_size[1] !== currentBedY)) {
+        updateBuildPlate(data.bed_size[0], data.bed_size[1]);
+      }
 
       // Setup scrubber
       const slider = document.getElementById('layer-slider');
