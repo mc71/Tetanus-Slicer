@@ -26,12 +26,11 @@ pub struct Slicer;
 
 impl Slicer {
     /// Intersect a single triangle with a horizontal plane at height Z.
-    /// Returns an unoriented line segment if an intersection exists.
+    /// Returns a line segment if an intersection exists.
     pub fn intersect_triangle(triangle: &Triangle, z: f64) -> Option<Segment2> {
         let v = &triangle.v;
         let mut pts = Vec::with_capacity(3);
 
-        // Check each of the 3 edges
         let edges = [(0, 1), (1, 2), (2, 0)];
         for &(i, j) in &edges {
             let v1 = v[i];
@@ -45,7 +44,6 @@ impl Slicer {
                 if (0.0..=1.0).contains(&t) {
                     let pt3 = v1 + (v2 - v1) * t;
                     let pt2 = pt3.to_2d();
-                    // Avoid duplicate intersection point from sharing vertices
                     if !pts.iter().any(|p: &Point2| p.distance_to(pt2) < 1e-5) {
                         pts.push(pt2);
                     }
@@ -66,18 +64,17 @@ impl Slicer {
         }
     }
 
-    /// Robust bidirectional segment chaining with spatial neighbor lookup.
-    /// Traverses segments in either direction to handle flipped normals and non-manifold edges.
+    /// Robust bidirectional segment chaining.
+    /// Connects line segments into closed 2D polygon loops.
     pub fn chain_segments(segments: &[Segment2]) -> Vec<ClassifiedContour> {
         if segments.is_empty() {
             return Vec::new();
         }
 
-        let cell_size = 0.05; // 50 microns spatial grid
-        let connect_tol = 0.08; // 80 microns connection tolerance
-        let close_tol = 0.50; // 500 microns gap closure for closing loops
+        let cell_size = 0.08;
+        let connect_tol = 0.15;
+        let close_tol = 1.0;
 
-        // Map grid cell -> list of (segment_index, end_index: 0=p1, 1=p2)
         let mut grid: HashMap<(i64, i64), Vec<(usize, u8)>> = HashMap::new();
 
         for (idx, seg) in segments.iter().enumerate() {
@@ -107,12 +104,6 @@ impl Slicer {
             let mut current_pt = segments[i].p2;
 
             loop {
-                // Check if we can close the loop with the start point
-                if loop_pts.len() >= 3 && current_pt.distance_to(loop_pts[0]) <= close_tol {
-                    break;
-                }
-
-                // Look for the closest unvisited segment endpoint in 3x3 neighboring cells
                 let cx = (current_pt.x / cell_size).floor() as i64;
                 let cy = (current_pt.y / cell_size).floor() as i64;
 
@@ -148,49 +139,49 @@ impl Slicer {
                     visited[next_seg_idx] = true;
                     let next_seg = segments[next_seg_idx];
                     let next_pt = if next_end_idx == 0 {
-                        // Connected at p1 -> traverse forward to p2
                         next_seg.p2
                     } else {
-                        // Connected at p2 -> traverse backward to p1
                         next_seg.p1
                     };
                     loop_pts.push(next_pt);
                     current_pt = next_pt;
                 } else {
-                    // No connected segment found; check if close enough to start point to bridge
-                    if loop_pts.len() >= 3 && current_pt.distance_to(loop_pts[0]) <= 1.0 {
-                        // Bridge gap and close loop
-                    }
+                    // Loop ends when no more unvisited connected segments exist
                     break;
                 }
             }
 
-            if loop_pts.len() >= 3 {
+            // Close loop if current_pt is near loop start
+            if loop_pts.len() >= 3 && current_pt.distance_to(loop_pts[0]) <= close_tol {
                 let poly = Polygon2::new(loop_pts);
-                // Filter out zero-area degeneracies
                 if poly.signed_area().abs() > 0.05 {
                     raw_polygons.push(poly);
                 }
             }
         }
 
-        // Classify each polygon as Outer Boundary vs Hole using Even-Odd Nesting
+        // Even-Odd nesting classification
         let n = raw_polygons.len();
         let mut classified = Vec::with_capacity(n);
 
         for i in 0..n {
             let mut container_count = 0;
             let sample_pt = raw_polygons[i].points[0];
+            let area_i = raw_polygons[i].signed_area().abs();
 
             for j in 0..n {
-                if i != j && raw_polygons[j].contains_point(sample_pt) {
-                    container_count += 1;
+                if i != j {
+                    let area_j = raw_polygons[j].signed_area().abs();
+                    // A container must have larger area
+                    if area_j > area_i && raw_polygons[j].contains_point(sample_pt) {
+                        container_count += 1;
+                    }
                 }
             }
 
             let mut poly = raw_polygons[i].clone();
             if container_count % 2 == 0 {
-                // Outer boundary: should be CCW
+                // Outer boundary: CCW
                 if poly.signed_area() < 0.0 {
                     poly.points.reverse();
                 }
@@ -199,7 +190,7 @@ impl Slicer {
                     role: ContourRole::Outer,
                 });
             } else {
-                // Hole: should be CW
+                // Hole: CW
                 if poly.signed_area() > 0.0 {
                     poly.points.reverse();
                 }
