@@ -5,6 +5,7 @@ mod infill;
 mod perimeter;
 mod slicer;
 mod stl;
+mod threemf;
 mod web;
 mod web_ui;
 

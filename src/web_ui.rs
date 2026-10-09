@@ -6,6 +6,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <title>Tetanus Slicer | High-Speed Rust 3D Slicing Engine</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <style>
     :root {
       --bg: #090d16;
@@ -144,9 +145,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <aside id="sidebar">
     <div class="dropzone" id="dropzone">
       <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
-      <p>Drop STL model here</p>
+      <p>Drop STL or 3MF model here</p>
       <span>or click to browse file</span>
-      <input type="file" id="file-input" accept=".stl" style="display:none">
+      <input type="file" id="file-input" accept=".stl,.3mf" style="display:none">
     </div>
 
     <div id="model-info">
@@ -318,13 +319,27 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
     });
 
-    function handleFile(file) {
+    function isZipBuffer(buffer) {
+      if (buffer.byteLength < 4) return false;
+      const b = new Uint8Array(buffer, 0, 4);
+      return b[0] === 0x50 && b[1] === 0x4B && b[2] === 0x03 && b[3] === 0x04;
+    }
+
+    async function handleFile(file) {
       currentFileName = file.name;
       const reader = new FileReader();
-      reader.onload = (e) => {
+      reader.onload = async (e) => {
         const buffer = e.target.result;
         currentStlBase64 = arrayBufferToBase64(buffer);
-        loadStlToScene(buffer);
+        if (file.name.toLowerCase().endsWith('.3mf') || isZipBuffer(buffer)) {
+          try {
+            await load3mfToScene(buffer);
+          } catch (err) {
+            alert('Failed to load 3MF: ' + err.message);
+          }
+        } else {
+          loadStlToScene(buffer);
+        }
       };
       reader.readAsArrayBuffer(file);
     }
@@ -339,9 +354,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       return window.btoa(binary);
     }
 
-    // --- Client-side STL Parser & Renderer ---
-    function loadStlToScene(buffer) {
-      const geometry = parseSTL(buffer);
+    function displayGeometryInScene(geometry) {
       geometry.computeVertexNormals();
 
       if (loadedMesh) scene.remove(loadedMesh);
@@ -379,6 +392,63 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       clearToolpaths();
       document.getElementById('scrubber-panel').style.display = 'none';
       document.getElementById('stats-pill').style.display = 'none';
+    }
+
+    // --- Client-side STL Parser & Renderer ---
+    function loadStlToScene(buffer) {
+      const geometry = parseSTL(buffer);
+      displayGeometryInScene(geometry);
+    }
+
+    // --- Client-side 3MF Parser & Renderer ---
+    async function load3mfToScene(buffer) {
+      const zip = await JSZip.loadAsync(buffer);
+      let modelXml = null;
+      for (let fname of Object.keys(zip.files)) {
+        if (fname.endsWith('.model')) {
+          modelXml = await zip.files[fname].async('text');
+          break;
+        }
+      }
+      if (!modelXml) throw new Error('No .model file found in 3MF archive');
+
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(modelXml, 'text/xml');
+      const modelEl = doc.querySelector('model');
+      const unit = modelEl ? modelEl.getAttribute('unit') : 'millimeter';
+      let scale = 1.0;
+      if (unit === 'meter') scale = 1000.0;
+      else if (unit === 'centimeter') scale = 10.0;
+      else if (unit === 'inch') scale = 25.4;
+      else if (unit === 'micron') scale = 0.001;
+
+      const vertexEls = doc.querySelectorAll('vertex');
+      const vertices = [];
+      vertexEls.forEach(v => {
+        vertices.push(
+          parseFloat(v.getAttribute('x')) * scale,
+          parseFloat(v.getAttribute('y')) * scale,
+          parseFloat(v.getAttribute('z')) * scale
+        );
+      });
+
+      const triangleEls = doc.querySelectorAll('triangle');
+      const triPositions = [];
+      triangleEls.forEach(t => {
+        const v1 = parseInt(t.getAttribute('v1'));
+        const v2 = parseInt(t.getAttribute('v2'));
+        const v3 = parseInt(t.getAttribute('v3'));
+        if (v1 * 3 + 2 >= vertices.length || v2 * 3 + 2 >= vertices.length || v3 * 3 + 2 >= vertices.length) return;
+        triPositions.push(
+          vertices[v1 * 3], vertices[v1 * 3 + 1], vertices[v1 * 3 + 2],
+          vertices[v2 * 3], vertices[v2 * 3 + 1], vertices[v2 * 3 + 2],
+          vertices[v3 * 3], vertices[v3 * 3 + 1], vertices[v3 * 3 + 2]
+        );
+      });
+
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.Float32BufferAttribute(triPositions, 3));
+      displayGeometryInScene(geom);
     }
 
     function parseSTL(buffer) {
@@ -594,7 +664,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const blob = new Blob([slicedData.gcode], { type: 'text/plain' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = currentFileName.replace(/\.stl$/i, '') + '.gcode';
+      a.download = currentFileName.replace(/\.(stl|3mf)$/i, '') + '.gcode';
       a.click();
     });
 

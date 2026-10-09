@@ -11,14 +11,35 @@ pub struct Mesh {
 }
 
 impl Mesh {
-    pub fn load_stl<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let file = File::open(&path).map_err(|e| format!("Failed to open file: {}", e))?;
+    pub fn load_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let p = path.as_ref();
+        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+            if ext.eq_ignore_ascii_case("3mf") {
+                let file = File::open(p).map_err(|e| format!("Failed to open file: {}", e))?;
+                return crate::threemf::ThreeMfParser::parse(BufReader::new(file));
+            }
+        }
+        let file = File::open(p).map_err(|e| format!("Failed to open file: {}", e))?;
         let mut reader = BufReader::new(file);
+        let mut magic = [0u8; 4];
+        if reader.read_exact(&mut magic).is_ok() && &magic == b"PK\x03\x04" {
+            reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            return crate::threemf::ThreeMfParser::parse(reader);
+        }
+        reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let file_len = reader.get_ref().metadata().map_err(|e| e.to_string())?.len();
         Self::from_reader(&mut reader, file_len)
     }
 
+    pub fn load_stl<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        Self::load_file(path)
+    }
+
     pub fn from_slice(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.starts_with(b"PK\x03\x04") {
+            let cursor = std::io::Cursor::new(bytes);
+            return crate::threemf::ThreeMfParser::parse(cursor);
+        }
         let mut cursor = std::io::Cursor::new(bytes);
         Self::from_reader(&mut cursor, bytes.len() as u64)
     }

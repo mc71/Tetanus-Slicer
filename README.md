@@ -6,7 +6,7 @@ A standalone, high-performance 3D slicing engine written in pure Rust.
 
 * **Multi-threaded Slicing Engine**: Every layer is computed in parallel across all CPU cores using `rayon`.
 * **Spatial Z-Interval Index**: Reduces triangle-plane intersection queries from $O(N \times L)$ to $O(\log N + K)$.
-* **Binary & ASCII STL Support**: Fast file loading with bounds calculation.
+* **Binary & ASCII STL and 3MF Support**: Fast native loading with automatic unit scaling (meter, cm, inch, mm) and bounds calculation.
 * **Segment Chaining**: Reconstructs closed 2D polygon loops from unordered triangle intersection segments.
 * **Perimeter Generation**: Concentric polygon insetting with miter clamping for shell generation.
 * **Rectilinear Infill**: Alternating 45° and 135° scanline ray-casting for solid interior infill.
@@ -26,15 +26,15 @@ Launch the embedded web server and open the interactive 3D slicer in your browse
 ```
 Then navigate to **`http://localhost:8080`**.
 * **3D Build Plate**: 220 × 220 mm bed grid with orbit/zoom controls.
-* **Drag-and-Drop STL**: Drop any STL file onto the viewport for instant 3D rendering.
+* **Drag-and-Drop STL & 3MF**: Drop any `.stl` or `.3mf` file onto the viewport for instant 3D rendering.
 * **Instant Slicing**: Slices models in milliseconds powered by the native multi-core Rust engine.
 * **Interactive Toolpath Scrubber**: Scrub through layers, inspect color-coded outer walls, inner walls, and infill, and auto-play the print buildup.
 * **One-Click G-code Export**: Download the sliced `.gcode` file ready for printing.
 
 ### CLI Mode
-Slice an STL file directly from the terminal:
+Slice an STL or 3MF file directly from the terminal:
 ```bash
-./target/release/tetanus-slicer path/to/model.stl output.gcode --layer-height 0.2 --perimeters 2 --infill 0.20
+./target/release/tetanus-slicer path/to/model.3mf output.gcode --layer-height 0.2 --perimeters 2 --infill 0.20
 ```
 
 If run without arguments, it generates a `cube.stl` calibration cube and slices it:
