@@ -451,11 +451,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (file0.name.toLowerCase().endsWith('.3mf') || isZipBuffer(buf0)) {
         try {
           await load3mfToScene(buf0);
+          performSlice(true);
         } catch (err) {
           alert('Failed to load 3MF: ' + err.message);
         }
       } else {
         loadStlToScene(buf0);
+        performSlice(true);
       }
     }
 
@@ -601,12 +603,31 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       return geom;
     }
 
-    // --- Slicing API Request ---
+    // --- Slicing API Request & Auto-Slice ---
     const sliceBtn = document.getElementById('slice-btn');
     const sliceSpinner = document.getElementById('slice-spinner');
     const sliceBtnText = document.getElementById('slice-btn-text');
+    let isSlicing = false;
+    let slicePending = false;
+    let autoSliceTimer = null;
 
-    sliceBtn.addEventListener('click', async () => {
+    async function performSlice(isAuto = false) {
+      if (!currentStlBase64) {
+        if (!isAuto) alert('Please load a 3D model first.');
+        return;
+      }
+
+      if (autoSliceTimer) {
+        clearTimeout(autoSliceTimer);
+        autoSliceTimer = null;
+      }
+
+      if (isSlicing) {
+        slicePending = true;
+        return;
+      }
+
+      isSlicing = true;
       sliceBtn.disabled = true;
       sliceSpinner.style.display = 'inline-block';
       sliceBtnText.innerText = 'Slicing in Rust...';
@@ -646,12 +667,45 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         slicedData = data;
         onSliceSuccess(data);
       } catch (err) {
-        alert('Slicing error: ' + err.message);
+        if (!isAuto) {
+          alert('Slicing error: ' + err.message);
+        } else {
+          console.warn('Auto-slice error:', err);
+        }
       } finally {
+        isSlicing = false;
         sliceBtn.disabled = false;
         sliceSpinner.style.display = 'none';
         sliceBtnText.innerText = '⚡ Slice Model';
+        if (slicePending) {
+          slicePending = false;
+          performSlice(true);
+        }
       }
+    }
+
+    function triggerDebouncedSlice() {
+      if (!currentStlBase64) return;
+      if (autoSliceTimer) clearTimeout(autoSliceTimer);
+      sliceBtnText.innerText = '⚡ Slicing in 0.5s...';
+      autoSliceTimer = setTimeout(() => {
+        autoSliceTimer = null;
+        performSlice(true);
+      }, 500);
+    }
+
+    // Auto-slice when any setting input, range, select, or checkbox changes (500ms debounce)
+    const sidebar = document.getElementById('sidebar');
+    const handleSettingChange = (e) => {
+      if (e.target && e.target.id && e.target.id.startsWith('inp-')) {
+        triggerDebouncedSlice();
+      }
+    };
+    sidebar.addEventListener('input', handleSettingChange);
+    sidebar.addEventListener('change', handleSettingChange);
+
+    sliceBtn.addEventListener('click', () => {
+      performSlice(false);
     });
 
     function onSliceSuccess(data) {
@@ -664,15 +718,17 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       // Setup scrubber
       const slider = document.getElementById('layer-slider');
+      const wasAtTop = !slider.max || parseInt(slider.value) >= parseInt(slider.max);
+      const prevVal = parseInt(slider.value) || data.layers.length;
       slider.min = 1;
       slider.max = data.layers.length;
-      slider.value = data.layers.length;
+      slider.value = wasAtTop ? data.layers.length : Math.min(prevVal, data.layers.length);
       document.getElementById('scrubber-panel').style.display = 'flex';
 
       // Mesh transparency
       if (loadedMesh) loadedMesh.material.opacity = 0.25;
 
-      renderToolpaths(data.layers.length);
+      renderToolpaths(parseInt(slider.value));
     }
 
     // --- Toolpath Visualization ---
