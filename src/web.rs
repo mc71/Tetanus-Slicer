@@ -75,13 +75,19 @@ pub struct SliceResponse {
 }
 
 #[derive(Serialize)]
+pub struct WebPerimeterPath {
+    pub points: Vec<[f64; 2]>,
+    pub is_outer: bool,
+}
+
+#[derive(Serialize)]
 pub struct WebLayer {
     pub index: usize,
     pub z: f64,
     pub skirt_brim: Vec<Vec<[f64; 2]>>,
     pub supports: Vec<Vec<[f64; 2]>>,
     pub support_infill: Vec<[[f64; 2]; 2]>,
-    pub perimeters: Vec<Vec<[f64; 2]>>,
+    pub perimeters: Vec<WebPerimeterPath>,
     pub infill: Vec<[[f64; 2]; 2]>,
 }
 
@@ -477,13 +483,17 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 .map(|seg| [[seg.p1.x, seg.p1.y], [seg.p2.x, seg.p2.y]])
                 .collect();
 
-            let perimeters = l
+            let perimeters: Vec<WebPerimeterPath> = l
                 .perimeters
                 .into_iter()
                 .flat_map(|poly_group| {
                     poly_group
                         .into_iter()
-                        .map(|p| p.points.into_iter().map(|pt| [pt.x, pt.y]).collect::<Vec<[f64; 2]>>())
+                        .enumerate()
+                        .map(|(idx, p)| WebPerimeterPath {
+                            points: p.points.into_iter().map(|pt| [pt.x, pt.y]).collect(),
+                            is_outer: idx == 0,
+                        })
                 })
                 .collect();
 

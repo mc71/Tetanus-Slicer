@@ -699,9 +699,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
         // Perimeters
         if (layer.perimeters) {
-          for (let pIdx = 0; pIdx < layer.perimeters.length; pIdx++) {
-            const poly = layer.perimeters[pIdx];
-            const color = (pIdx === 0) ? colOuter : colInner;
+          for (let perim of layer.perimeters) {
+            const color = perim.is_outer ? colOuter : colInner;
+            const poly = perim.points;
+            if (!poly || poly.length < 2) continue;
             const n = poly.length;
             for (let j = 0; j < n; j++) {
               const p1 = poly[j];
