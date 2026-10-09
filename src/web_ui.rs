@@ -155,6 +155,58 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
     .banner-btn:hover { background: #e11d48; border-color: #f43f5e; color: white; }
 
+    /* Collapsible Settings Accordions */
+    .settings-group {
+      background: rgba(30, 41, 59, 0.35);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 4px;
+      transition: border-color 0.15s ease;
+    }
+    .settings-group[open] {
+      border-color: rgba(249, 115, 22, 0.35);
+    }
+    .settings-group summary {
+      padding: 9px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text);
+      cursor: pointer;
+      user-select: none;
+      background: rgba(15, 23, 42, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      outline: none;
+      list-style: none;
+      transition: background 0.15s ease, color 0.15s ease;
+    }
+    .settings-group summary::-webkit-details-marker {
+      display: none;
+    }
+    .settings-group summary:hover {
+      background: rgba(249, 115, 22, 0.08);
+      color: var(--accent);
+    }
+    .settings-group summary::after {
+      content: '▾';
+      font-size: 13px;
+      color: var(--text-muted);
+      transition: transform 0.2s ease;
+    }
+    .settings-group:not([open]) summary::after {
+      transform: rotate(-90deg);
+    }
+    .group-content {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
     /* Spinner */
     .spinner {
       width: 16px; height: 16px; border: 2px solid white; border-top-color: transparent;
@@ -202,170 +254,189 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <div class="row"><span class="label">Triangles:</span><span class="val" id="info-triangles">-</span></div>
     </div>
 
-    <!-- Model Manipulation & Orientation Tools -->
-    <div id="model-tools" style="display:none; flex-direction:column; gap:10px;">
-      <div class="section-title">Model Transformations</div>
+    <!-- 1. Model Transformations & Plating (visible when model is loaded) -->
+    <details class="settings-group" id="group-model-tools" open style="display:none;">
+      <summary>🛠️ Model Transformations</summary>
+      <div class="group-content" id="model-tools">
+        <!-- Rotate 90° -->
+        <div class="field">
+          <div class="field-header"><label>Rotate 90°</label></div>
+          <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;">
+            <button class="tool-btn" id="btn-rot-x" title="Rotate 90° around X axis (Roll)">🔄 X 90°</button>
+            <button class="tool-btn" id="btn-rot-y" title="Rotate 90° around Y axis (Pitch)">🔄 Y 90°</button>
+            <button class="tool-btn" id="btn-rot-z" title="Rotate 90° around Z axis (Yaw)">🔄 Z 90°</button>
+          </div>
+        </div>
 
-      <!-- Rotate 90° -->
-      <div class="field">
-        <div class="field-header"><label>Rotate 90°</label></div>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;">
-          <button class="tool-btn" id="btn-rot-x" title="Rotate 90° around X axis">🔄 X 90°</button>
-          <button class="tool-btn" id="btn-rot-y" title="Rotate 90° around Y axis">🔄 Y 90°</button>
-          <button class="tool-btn" id="btn-rot-z" title="Rotate 90° around Z axis">🔄 Z 90°</button>
+        <!-- Orient / Lay Flat -->
+        <div class="field">
+          <div class="field-header"><label>Orientation</label></div>
+          <div class="grid-2">
+            <button class="tool-btn highlight" id="btn-place-face" title="Click a face to snap it to build plate (Shortcut: F)">📐 Lay on Face (F)</button>
+            <button class="tool-btn" id="btn-auto-flat" title="Automatically orient largest flat face onto bed">⚡ Auto Flat</button>
+          </div>
+        </div>
+
+        <!-- Scale -->
+        <div class="field">
+          <div class="field-header"><label>Scale</label><span id="val-scale">100%</span></div>
+          <input type="range" id="inp-scale" min="20" max="300" step="5" value="100">
+          <div style="display:flex; justify-content:space-between; gap:6px; margin-top:2px;">
+            <button class="tool-btn-sm" id="btn-scale-minus" style="flex:1;">-10%</button>
+            <button class="tool-btn-sm" id="btn-scale-reset" style="flex:1;">100%</button>
+            <button class="tool-btn-sm" id="btn-scale-plus" style="flex:1;">+10%</button>
+          </div>
+        </div>
+
+        <!-- Duplicate -->
+        <div class="field">
+          <div class="field-header"><label>Duplicate on Plate</label><span id="val-copies" style="color:var(--cyan); font-weight:700;">1 copy</span></div>
+          <div class="grid-2">
+            <button class="tool-btn" id="btn-duplicate" title="Add another copy to bed plater (Shortcut: D)">➕ Duplicate</button>
+            <button class="tool-btn" id="btn-clear-copies" title="Reset additional copies">🗑️ Reset</button>
+          </div>
         </div>
       </div>
+    </details>
 
-      <!-- Orient / Lay Flat -->
-      <div class="field">
-        <div class="field-header"><label>Orientation</label></div>
+    <!-- 2. Printer & Filament Profiles -->
+    <details class="settings-group" id="group-printer" open>
+      <summary>🖨️ Printer & Material</summary>
+      <div class="group-content">
+        <div class="field">
+          <div class="field-header"><label>3D Printer</label></div>
+          <select id="inp-machine" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+            <option value="bambu_a1" selected>Bambu Lab A1 (256×256 mm)</option>
+            <option value="generic_cartesian">Generic Cartesian (220×220 mm)</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="field-header"><label>Filament Material</label></div>
+          <select id="inp-material" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+            <option value="pla" selected>Generic PLA (210°C / 60°C)</option>
+            <option value="petg">Generic PETG (245°C / 70°C)</option>
+          </select>
+        </div>
+      </div>
+    </details>
+
+    <!-- 3. Quality & Shells -->
+    <details class="settings-group" id="group-quality" open>
+      <summary>📐 Layer Quality & Shells</summary>
+      <div class="group-content">
+        <div class="field">
+          <div class="field-header"><label>Layer Height</label><span id="val-layer-height">0.20 mm</span></div>
+          <input type="range" id="inp-layer-height" min="0.08" max="0.32" step="0.04" value="0.20">
+        </div>
+        <div class="field">
+          <div class="field-header"><label>Variable Layer Heights</label></div>
+          <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:24px;">
+            <input type="checkbox" id="inp-adaptive-layers" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
+            <span>Adaptive (0.08 - 0.28 mm by slope)</span>
+          </label>
+        </div>
+        <div class="field">
+          <div class="field-header"><label>Vase Mode</label></div>
+          <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:24px;">
+            <input type="checkbox" id="inp-spiral-vase" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
+            <span>Spiralize Outer Contour</span>
+          </label>
+        </div>
+        <div class="field">
+          <div class="field-header"><label>Seam Placement</label></div>
+          <select id="inp-seam" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+            <option value="aligned" selected>Aligned (Convex Corners)</option>
+            <option value="rear">Rear (+Y Back of Bed)</option>
+            <option value="nearest">Nearest (Fastest Travel)</option>
+            <option value="random">Random (Scattered)</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="field-header"><label>Wall Count (Perimeters)</label><span id="val-perimeters">2</span></div>
+          <input type="range" id="inp-perimeters" min="1" max="5" step="1" value="2">
+        </div>
         <div class="grid-2">
-          <button class="tool-btn highlight" id="btn-place-face" title="Click a face to snap it to build plate (Shortcut: F)">📐 Lay on Face (F)</button>
-          <button class="tool-btn" id="btn-auto-flat" title="Automatically orient largest flat face onto bed">⚡ Auto Flat</button>
+          <div class="field">
+            <div class="field-header"><label>Top Shells</label><span id="val-top-solid">4</span></div>
+            <input type="range" id="inp-top-solid" min="0" max="10" step="1" value="4">
+          </div>
+          <div class="field">
+            <div class="field-header"><label>Bottom Shells</label><span id="val-bottom-solid">4</span></div>
+            <input type="range" id="inp-bottom-solid" min="0" max="10" step="1" value="4">
+          </div>
         </div>
       </div>
+    </details>
 
-      <!-- Scale -->
-      <div class="field">
-        <div class="field-header"><label>Scale</label><span id="val-scale">100%</span></div>
-        <input type="range" id="inp-scale" min="20" max="300" step="5" value="100">
-        <div style="display:flex; justify-content:space-between; gap:6px; margin-top:2px;">
-          <button class="tool-btn-sm" id="btn-scale-minus" style="flex:1;">-10%</button>
-          <button class="tool-btn-sm" id="btn-scale-reset" style="flex:1;">100%</button>
-          <button class="tool-btn-sm" id="btn-scale-plus" style="flex:1;">+10%</button>
+    <!-- 4. Infill & Supports -->
+    <details class="settings-group" id="group-infill">
+      <summary>🏗️ Infill & Supports</summary>
+      <div class="group-content">
+        <div class="field">
+          <div class="field-header"><label>Infill Pattern</label></div>
+          <select id="inp-infill-pattern" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+            <option value="rectilinear" selected>Rectilinear (Standard 45°/135°)</option>
+            <option value="grid">Grid (Square Crosshatch)</option>
+            <option value="triangles">Triangles (Isotropic Rigidity)</option>
+            <option value="gyroid">Gyroid (Continuous 3D Sinusoidal)</option>
+          </select>
         </div>
-      </div>
-
-      <!-- Duplicate -->
-      <div class="field">
-        <div class="field-header"><label>Duplicate on Plate</label><span id="val-copies" style="color:var(--cyan); font-weight:700;">1 copy</span></div>
+        <div class="field">
+          <div class="field-header"><label>Infill Density</label><span id="val-infill">20%</span></div>
+          <input type="range" id="inp-infill" min="0" max="100" step="5" value="20">
+        </div>
         <div class="grid-2">
-          <button class="tool-btn" id="btn-duplicate" title="Add another copy to bed plater (Shortcut: D)">➕ Duplicate</button>
-          <button class="tool-btn" id="btn-clear-copies" title="Reset additional copies">🗑️ Reset</button>
+          <div class="field">
+            <div class="field-header"><label>Supports</label></div>
+            <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:28px;">
+              <input type="checkbox" id="inp-support-enabled" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
+              <span>Generate</span>
+            </label>
+          </div>
+          <div class="field">
+            <div class="field-header"><label>Overhang Angle</label><span id="val-support-angle">45°</span></div>
+            <input type="range" id="inp-support-angle" min="30" max="75" step="5" value="45">
+          </div>
         </div>
       </div>
-    </div>
+    </details>
 
-    <div class="section-title">Machine & Material</div>
-    <div class="field">
-      <div class="field-header"><label>3D Printer</label></div>
-      <select id="inp-machine" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
-        <option value="bambu_a1" selected>Bambu Lab A1 (256×256 mm)</option>
-        <option value="generic_cartesian">Generic Cartesian (220×220 mm)</option>
-      </select>
-    </div>
-    <div class="field">
-      <div class="field-header"><label>Filament Material</label></div>
-      <select id="inp-material" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
-        <option value="pla" selected>Generic PLA (210°C / 60°C)</option>
-        <option value="petg">Generic PETG (245°C / 70°C)</option>
-      </select>
-    </div>
-
-    <div class="section-title">Print Quality</div>
-    <div class="field">
-      <div class="field-header"><label>Layer Height</label><span id="val-layer-height">0.20 mm</span></div>
-      <input type="range" id="inp-layer-height" min="0.08" max="0.32" step="0.04" value="0.20">
-    </div>
-    <div class="field">
-      <div class="field-header"><label>Variable Layer Heights</label></div>
-      <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:24px;">
-        <input type="checkbox" id="inp-adaptive-layers" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
-        <span>Adaptive (0.08 - 0.28 mm by slope)</span>
-      </label>
-    </div>
-    <div class="field">
-      <div class="field-header"><label>Vase Mode</label></div>
-      <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:24px;">
-        <input type="checkbox" id="inp-spiral-vase" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
-        <span>Spiralize Outer Contour</span>
-      </label>
-    </div>
-    <div class="field">
-      <div class="field-header"><label>Seam Placement</label></div>
-      <select id="inp-seam" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
-        <option value="aligned" selected>Aligned (Convex Corners)</option>
-        <option value="rear">Rear (+Y Back of Bed)</option>
-        <option value="nearest">Nearest (Fastest Travel)</option>
-        <option value="random">Random (Scattered)</option>
-      </select>
-    </div>
-    <div class="field">
-      <div class="field-header"><label>Wall Count (Perimeters)</label><span id="val-perimeters">2</span></div>
-      <input type="range" id="inp-perimeters" min="1" max="5" step="1" value="2">
-    </div>
-    <div class="field">
-      <div class="field-header"><label>Infill Pattern</label></div>
-      <select id="inp-infill-pattern" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
-        <option value="rectilinear" selected>Rectilinear (Standard 45°/135°)</option>
-        <option value="grid">Grid (Square Crosshatch)</option>
-        <option value="triangles">Triangles (Isotropic Rigidity)</option>
-        <option value="gyroid">Gyroid (Continuous 3D Sinusoidal)</option>
-      </select>
-    </div>
-    <div class="field">
-      <div class="field-header"><label>Infill Density</label><span id="val-infill">20%</span></div>
-      <input type="range" id="inp-infill" min="0" max="100" step="5" value="20">
-    </div>
-    <div class="grid-2">
-      <div class="field">
-        <div class="field-header"><label>Top Shells</label><span id="val-top-solid">4</span></div>
-        <input type="range" id="inp-top-solid" min="0" max="10" step="1" value="4">
+    <!-- 5. Speeds, Adhesion & Thermal -->
+    <details class="settings-group" id="group-speeds">
+      <summary>⚡ Speeds, Adhesion & Thermal</summary>
+      <div class="group-content">
+        <div class="grid-2">
+          <div class="field">
+            <div class="field-header"><label>Speed</label><span id="val-speed">50</span></div>
+            <input type="range" id="inp-speed" min="20" max="120" step="5" value="50">
+          </div>
+          <div class="field">
+            <div class="field-header"><label>Nozzle</label><span id="val-nozzle">210°C</span></div>
+            <input type="range" id="inp-nozzle" min="180" max="260" step="5" value="210">
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <div class="field-header"><label>Skirt Loops</label><span id="val-skirt">2</span></div>
+            <input type="range" id="inp-skirt" min="0" max="6" step="1" value="2">
+          </div>
+          <div class="field">
+            <div class="field-header"><label>Brim Width</label><span id="val-brim">0 mm</span></div>
+            <input type="range" id="inp-brim" min="0" max="15" step="1" value="0">
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <div class="field-header"><label>Z-Hop</label><span id="val-z-hop">0.20 mm</span></div>
+            <input type="range" id="inp-z-hop" min="0" max="1.0" step="0.05" value="0.20">
+          </div>
+          <div class="field">
+            <div class="field-header"><label>Cooling Fan</label><span id="val-fan">100%</span></div>
+            <input type="range" id="inp-fan" min="0" max="255" step="15" value="255">
+          </div>
+        </div>
       </div>
-      <div class="field">
-        <div class="field-header"><label>Bottom Shells</label><span id="val-bottom-solid">4</span></div>
-        <input type="range" id="inp-bottom-solid" min="0" max="10" step="1" value="4">
-      </div>
-    </div>
-
-    <div class="section-title">Support Structures</div>
-    <div class="grid-2">
-      <div class="field">
-        <div class="field-header"><label>Supports</label></div>
-        <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:28px;">
-          <input type="checkbox" id="inp-support-enabled" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
-          <span>Generate</span>
-        </label>
-      </div>
-      <div class="field">
-        <div class="field-header"><label>Overhang Angle</label><span id="val-support-angle">45°</span></div>
-        <input type="range" id="inp-support-angle" min="30" max="75" step="5" value="45">
-      </div>
-    </div>
-
-    <div class="section-title">Adhesion & Retraction</div>
-    <div class="grid-2">
-      <div class="field">
-        <div class="field-header"><label>Skirt Loops</label><span id="val-skirt">2</span></div>
-        <input type="range" id="inp-skirt" min="0" max="6" step="1" value="2">
-      </div>
-      <div class="field">
-        <div class="field-header"><label>Brim Width</label><span id="val-brim">0 mm</span></div>
-        <input type="range" id="inp-brim" min="0" max="15" step="1" value="0">
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="field">
-        <div class="field-header"><label>Z-Hop</label><span id="val-z-hop">0.20 mm</span></div>
-        <input type="range" id="inp-z-hop" min="0" max="1.0" step="0.05" value="0.20">
-      </div>
-      <div class="field">
-        <div class="field-header"><label>Cooling Fan</label><span id="val-fan">100%</span></div>
-        <input type="range" id="inp-fan" min="0" max="255" step="15" value="255">
-      </div>
-    </div>
-
-    <div class="section-title">Speeds & Thermal</div>
-    <div class="grid-2">
-      <div class="field">
-        <div class="field-header"><label>Speed</label><span id="val-speed">50</span></div>
-        <input type="range" id="inp-speed" min="20" max="120" step="5" value="50">
-      </div>
-      <div class="field">
-        <div class="field-header"><label>Nozzle</label><span id="val-nozzle">210°C</span></div>
-        <input type="range" id="inp-nozzle" min="180" max="260" step="5" value="210">
-      </div>
-    </div>
+    </details>
 
     <button id="slice-btn">
       <span class="spinner" id="slice-spinner"></span>
@@ -693,8 +764,11 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (valScale) valScale.innerText = '100%';
       const valCopies = document.getElementById('val-copies');
       if (valCopies) valCopies.innerText = `${additionalModelsBase64.length + 1} copy`;
-      const modelTools = document.getElementById('model-tools');
-      if (modelTools) modelTools.style.display = 'flex';
+      const modelTools = document.getElementById('group-model-tools') || document.getElementById('model-tools');
+      if (modelTools) {
+        modelTools.style.display = 'block';
+        if ('open' in modelTools) modelTools.open = true;
+      }
 
       // Update UI Info
       document.getElementById('model-info').style.display = 'block';
@@ -823,13 +897,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         pB.fromBufferAttribute(pos, i3 + 1);
         pC.fromBufferAttribute(pos, i3 + 2);
 
-        cb.subVectors(pC, pB);
-        ab.subVectors(pA, pB);
-        cb.cross(ab).normalize();
+        ab.subVectors(pB, pA);
+        cb.subVectors(pC, pA);
+        ab.cross(cb).normalize();
 
-        view.setFloat32(offset, cb.x, true);
-        view.setFloat32(offset + 4, cb.y, true);
-        view.setFloat32(offset + 8, cb.z, true);
+        view.setFloat32(offset, ab.x, true);
+        view.setFloat32(offset + 4, ab.y, true);
+        view.setFloat32(offset + 8, ab.z, true);
         offset += 12;
 
         view.setFloat32(offset, pA.x, true);
@@ -872,9 +946,23 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       else if (axis === 'y') q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rad);
       else if (axis === 'z') q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), rad);
 
+      // Centroid centering before rotation to prevent orbital offset
+      loadedMesh.geometry.computeBoundingBox();
+      const bb = loadedMesh.geometry.boundingBox;
+      const cx = (bb.max.x + bb.min.x) * 0.5;
+      const cy = (bb.max.y + bb.min.y) * 0.5;
+      const cz = (bb.max.z + bb.min.z) * 0.5;
+      loadedMesh.geometry.translate(-cx, -cy, -cz);
+
       loadedMesh.geometry.applyQuaternion(q);
-      loadedMesh.geometry.computeVertexNormals();
+
       centerAndDropToBed(loadedMesh.geometry);
+      loadedMesh.geometry.attributes.position.needsUpdate = true;
+      loadedMesh.geometry.computeVertexNormals();
+      if (loadedMesh.geometry.attributes.normal) {
+        loadedMesh.geometry.attributes.normal.needsUpdate = true;
+      }
+
       updateModelInfo();
       syncGeometryToSlicer();
     }
@@ -884,13 +972,28 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (!loadedMesh) return;
       newPercent = Math.max(10, Math.min(500, Math.round(newPercent)));
       const factor = newPercent / currentScalePercent;
+
+      loadedMesh.geometry.computeBoundingBox();
+      const bb = loadedMesh.geometry.boundingBox;
+      const cx = (bb.max.x + bb.min.x) * 0.5;
+      const cy = (bb.max.y + bb.min.y) * 0.5;
+      const cz = (bb.max.z + bb.min.z) * 0.5;
+      loadedMesh.geometry.translate(-cx, -cy, -cz);
+
       loadedMesh.geometry.scale(factor, factor, factor);
       currentScalePercent = newPercent;
       const inp = document.getElementById('inp-scale');
       if (inp) inp.value = newPercent;
       const val = document.getElementById('val-scale');
       if (val) val.innerText = `${newPercent}%`;
+
       centerAndDropToBed(loadedMesh.geometry);
+      loadedMesh.geometry.attributes.position.needsUpdate = true;
+      loadedMesh.geometry.computeVertexNormals();
+      if (loadedMesh.geometry.attributes.normal) {
+        loadedMesh.geometry.attributes.normal.needsUpdate = true;
+      }
+
       updateModelInfo();
       syncGeometryToSlicer();
     }
@@ -899,9 +1002,23 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (!loadedMesh) return;
       const targetNormal = new THREE.Vector3(0, 0, -1);
       const q = new THREE.Quaternion().setFromUnitVectors(faceNormal, targetNormal);
+
+      loadedMesh.geometry.computeBoundingBox();
+      const bb = loadedMesh.geometry.boundingBox;
+      const cx = (bb.max.x + bb.min.x) * 0.5;
+      const cy = (bb.max.y + bb.min.y) * 0.5;
+      const cz = (bb.max.z + bb.min.z) * 0.5;
+      loadedMesh.geometry.translate(-cx, -cy, -cz);
+
       loadedMesh.geometry.applyQuaternion(q);
-      loadedMesh.geometry.computeVertexNormals();
+
       centerAndDropToBed(loadedMesh.geometry);
+      loadedMesh.geometry.attributes.position.needsUpdate = true;
+      loadedMesh.geometry.computeVertexNormals();
+      if (loadedMesh.geometry.attributes.normal) {
+        loadedMesh.geometry.attributes.normal.needsUpdate = true;
+      }
+
       updateModelInfo();
       syncGeometryToSlicer();
     }
@@ -1193,6 +1310,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       document.getElementById('stat-time').innerText = `${data.stats.elapsed_ms.toFixed(1)} ms`;
       document.getElementById('stat-layers').innerText = data.stats.layer_count;
       document.getElementById('stat-print-time').innerText = data.stats.print_time_formatted || '-';
+      const statFilament = document.getElementById('stat-filament');
+      if (statFilament && data.stats) {
+        statFilament.innerText = `${data.stats.filament_grams.toFixed(1)}g (${data.stats.filament_meters.toFixed(1)}m)`;
+      }
       document.getElementById('stats-pill').style.display = 'flex';
 
       // Update build plate size if provided

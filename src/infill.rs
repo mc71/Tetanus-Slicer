@@ -181,12 +181,27 @@ impl InfillGenerator {
         z: f64,
     ) -> Vec<Segment2> {
         let spacing = line_width / density.clamp(0.01, 1.0);
-        let wavelength = (spacing * 1.5).max(1.0);
-        let amplitude = spacing * 0.35;
-        let phase_z = (2.0 * std::f64::consts::PI * z) / wavelength;
-        let angle = std::f64::consts::FRAC_PI_4; // 45 deg base angle
+        let wavelength = (spacing * 1.6).max(1.2);
+        let amplitude = spacing * 0.38;
+        let k_z = (2.0 * std::f64::consts::PI * z) / wavelength;
+
+        // In Schoen's Gyroid TPMS: sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x) = 0
+        // As Z progresses, the cross-section alternates dominant direction by 90 degrees
+        // (alternating between 45 deg and 135 deg) while continuously phase-shifting.
+        let norm_phase = (k_z % (2.0 * std::f64::consts::PI) + 2.0 * std::f64::consts::PI) % (2.0 * std::f64::consts::PI);
+        let is_orthogonal = (norm_phase >= 0.25 * std::f64::consts::PI && norm_phase < 0.75 * std::f64::consts::PI)
+            || (norm_phase >= 1.25 * std::f64::consts::PI && norm_phase < 1.75 * std::f64::consts::PI);
+
+        let angle = if is_orthogonal {
+            3.0 * std::f64::consts::FRAC_PI_4 // 135 deg
+        } else {
+            std::f64::consts::FRAC_PI_4 // 45 deg
+        };
         let cos_a = angle.cos();
         let sin_a = angle.sin();
+
+        let wave_shift = k_z;
+        let lateral_bias = amplitude * 0.35 * k_z.cos();
 
         let mut rotated_boundaries: Vec<Vec<Point2>> = Vec::with_capacity(boundaries.len());
         let mut min_y = f64::MAX;
@@ -254,7 +269,7 @@ impl InfillGenerator {
                 for s in 0..=steps {
                     let cur_x = x1 + (s as f64) * dx;
                     let k = (2.0 * std::f64::consts::PI * cur_x) / wavelength;
-                    let cur_y = y + amplitude * (k + phase_z + line_phase).sin();
+                    let cur_y = y + lateral_bias + amplitude * (k + wave_shift + line_phase).sin();
 
                     let orig_pt = Point2::new(
                         cur_x * cos_a - cur_y * sin_a,
