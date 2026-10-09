@@ -119,6 +119,42 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     .legend-item { display: flex; align-items: center; gap: 4px; }
     .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
 
+    /* Model Tool Buttons & Place on Face Banner */
+    .tool-btn {
+      background: #1e293b; color: #f8fafc; border: 1px solid #475569;
+      padding: 7px 8px; border-radius: 8px; font-size: 11px; font-weight: 600;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      gap: 5px; transition: all 0.15s ease;
+    }
+    .tool-btn:hover { background: #334155; border-color: var(--accent); color: white; }
+    .tool-btn.highlight { border-color: var(--cyan); background: rgba(6, 182, 212, 0.12); color: #38bdf8; }
+    .tool-btn.highlight:hover, .tool-btn.highlight.active { background: #06b6d4; color: #0f172a; border-color: #06b6d4; }
+    .tool-btn-sm {
+      background: #1e293b; color: #cbd5e1; border: 1px solid #475569;
+      padding: 4px 6px; border-radius: 6px; font-size: 11px; font-weight: 600;
+      cursor: pointer; transition: all 0.15s ease;
+    }
+    .tool-btn-sm:hover { background: #334155; color: white; border-color: var(--accent); }
+
+    #place-face-banner {
+      display: none; position: absolute; top: 70px; left: 50%; transform: translateX(-50%);
+      background: rgba(15, 23, 42, 0.92); backdrop-filter: blur(16px);
+      border: 1px solid var(--cyan); box-shadow: 0 10px 30px rgba(6, 182, 212, 0.35);
+      padding: 9px 20px; border-radius: 30px; z-index: 25;
+      align-items: center; gap: 14px; font-size: 12px; color: #f8fafc;
+      animation: bannerSlideIn 0.2s ease-out;
+    }
+    @keyframes bannerSlideIn {
+      from { transform: translate(-50%, -10px); opacity: 0; }
+      to { transform: translate(-50%, 0); opacity: 1; }
+    }
+    .banner-btn {
+      background: #334155; color: #f8fafc; border: 1px solid #475569;
+      padding: 3px 12px; border-radius: 12px; font-size: 11px; font-weight: 600;
+      cursor: pointer; transition: all 0.15s ease;
+    }
+    .banner-btn:hover { background: #e11d48; border-color: #f43f5e; color: white; }
+
     /* Spinner */
     .spinner {
       width: 16px; height: 16px; border: 2px solid white; border-top-color: transparent;
@@ -143,6 +179,12 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     </div>
   </header>
 
+  <!-- Interactive Place on Face Floating Notification -->
+  <div id="place-face-banner">
+    <span>📐 <b>Place on Face:</b> Hover & click any flat face on model to lay flat on bed</span>
+    <button id="btn-cancel-place-face" class="banner-btn">Esc / Cancel</button>
+  </div>
+
   <div id="canvas-container"></div>
 
   <!-- Sidebar -->
@@ -158,6 +200,50 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <div class="row"><span class="label">Model:</span><span class="val" id="info-name">-</span></div>
       <div class="row"><span class="label">Dimensions:</span><span class="val" id="info-size">-</span></div>
       <div class="row"><span class="label">Triangles:</span><span class="val" id="info-triangles">-</span></div>
+    </div>
+
+    <!-- Model Manipulation & Orientation Tools -->
+    <div id="model-tools" style="display:none; flex-direction:column; gap:10px;">
+      <div class="section-title">Model Transformations</div>
+
+      <!-- Rotate 90° -->
+      <div class="field">
+        <div class="field-header"><label>Rotate 90°</label></div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;">
+          <button class="tool-btn" id="btn-rot-x" title="Rotate 90° around X axis">🔄 X 90°</button>
+          <button class="tool-btn" id="btn-rot-y" title="Rotate 90° around Y axis">🔄 Y 90°</button>
+          <button class="tool-btn" id="btn-rot-z" title="Rotate 90° around Z axis">🔄 Z 90°</button>
+        </div>
+      </div>
+
+      <!-- Orient / Lay Flat -->
+      <div class="field">
+        <div class="field-header"><label>Orientation</label></div>
+        <div class="grid-2">
+          <button class="tool-btn highlight" id="btn-place-face" title="Click a face to snap it to build plate (Shortcut: F)">📐 Lay on Face (F)</button>
+          <button class="tool-btn" id="btn-auto-flat" title="Automatically orient largest flat face onto bed">⚡ Auto Flat</button>
+        </div>
+      </div>
+
+      <!-- Scale -->
+      <div class="field">
+        <div class="field-header"><label>Scale</label><span id="val-scale">100%</span></div>
+        <input type="range" id="inp-scale" min="20" max="300" step="5" value="100">
+        <div style="display:flex; justify-content:space-between; gap:6px; margin-top:2px;">
+          <button class="tool-btn-sm" id="btn-scale-minus" style="flex:1;">-10%</button>
+          <button class="tool-btn-sm" id="btn-scale-reset" style="flex:1;">100%</button>
+          <button class="tool-btn-sm" id="btn-scale-plus" style="flex:1;">+10%</button>
+        </div>
+      </div>
+
+      <!-- Duplicate -->
+      <div class="field">
+        <div class="field-header"><label>Duplicate on Plate</label><span id="val-copies" style="color:var(--cyan); font-weight:700;">1 copy</span></div>
+        <div class="grid-2">
+          <button class="tool-btn" id="btn-duplicate" title="Add another copy to bed plater (Shortcut: D)">➕ Duplicate</button>
+          <button class="tool-btn" id="btn-clear-copies" title="Reset additional copies">🗑️ Reset</button>
+        </div>
+      </div>
     </div>
 
     <div class="section-title">Machine & Material</div>
@@ -561,23 +647,33 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       return window.btoa(binary);
     }
 
+    function centerAndDropToBed(geometry) {
+      geometry.computeBoundingBox();
+      const bb = geometry.boundingBox;
+      const centerX = (bb.max.x + bb.min.x) * 0.5;
+      const centerY = (bb.max.y + bb.min.y) * 0.5;
+      const minZ = bb.min.z;
+      geometry.translate(currentBedX * 0.5 - centerX, currentBedY * 0.5 - centerY, -minZ);
+      geometry.computeBoundingBox();
+    }
+
+    function updateModelInfo() {
+      if (!loadedMesh) return;
+      loadedMesh.geometry.computeBoundingBox();
+      const bb = loadedMesh.geometry.boundingBox;
+      const sizeX = bb.max.x - bb.min.x;
+      const sizeY = bb.max.y - bb.min.y;
+      const sizeZ = bb.max.z - bb.min.z;
+      document.getElementById('info-size').innerText = `${sizeX.toFixed(1)} × ${sizeY.toFixed(1)} × ${sizeZ.toFixed(1)} mm`;
+      document.getElementById('info-triangles').innerText = (loadedMesh.geometry.attributes.position.count / 3).toLocaleString();
+    }
+
     function displayGeometryInScene(geometry) {
       geometry.computeVertexNormals();
 
       if (loadedMesh) scene.remove(loadedMesh);
 
-      // Center geometry on 220x220 build plate
-      geometry.computeBoundingBox();
-      const bb = geometry.boundingBox;
-      const sizeX = bb.max.x - bb.min.x;
-      const sizeY = bb.max.y - bb.min.y;
-      const sizeZ = bb.max.z - bb.min.z;
-
-      const centerX = (bb.max.x + bb.min.x) / 2;
-      const centerY = (bb.max.y + bb.min.y) / 2;
-      const minZ = bb.min.z;
-
-      geometry.translate(currentBedX * 0.5 - centerX, currentBedY * 0.5 - centerY, -minZ);
+      centerAndDropToBed(geometry);
 
       const material = new THREE.MeshPhongMaterial({
         color: 0x94a3b8,
@@ -589,11 +685,21 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       loadedMesh = new THREE.Mesh(geometry, material);
       scene.add(loadedMesh);
 
+      // Reset transforms UI
+      currentScalePercent = 100;
+      const inpScale = document.getElementById('inp-scale');
+      if (inpScale) inpScale.value = 100;
+      const valScale = document.getElementById('val-scale');
+      if (valScale) valScale.innerText = '100%';
+      const valCopies = document.getElementById('val-copies');
+      if (valCopies) valCopies.innerText = `${additionalModelsBase64.length + 1} copy`;
+      const modelTools = document.getElementById('model-tools');
+      if (modelTools) modelTools.style.display = 'flex';
+
       // Update UI Info
       document.getElementById('model-info').style.display = 'block';
       document.getElementById('info-name').innerText = currentFileName;
-      document.getElementById('info-size').innerText = `${sizeX.toFixed(1)} × ${sizeY.toFixed(1)} × ${sizeZ.toFixed(1)} mm`;
-      document.getElementById('info-triangles').innerText = (geometry.attributes.position.count / 3).toLocaleString();
+      updateModelInfo();
 
       // Clear previous toolpaths
       clearToolpaths();
@@ -693,6 +799,214 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       return geom;
     }
 
+    // --- Binary STL Serializer ---
+    function geometryToBinaryStl(geometry) {
+      const geom = geometry.index ? geometry.toNonIndexed() : geometry;
+      const pos = geom.attributes.position;
+      const numTriangles = Math.floor(pos.count / 3);
+      const buffer = new ArrayBuffer(84 + numTriangles * 50);
+      const view = new DataView(buffer);
+
+      const header = "Tetanus Slicer Exported STL";
+      for (let i = 0; i < header.length; i++) {
+        view.setUint8(i, header.charCodeAt(i));
+      }
+      view.setUint32(80, numTriangles, true);
+
+      let offset = 84;
+      const pA = new THREE.Vector3(), pB = new THREE.Vector3(), pC = new THREE.Vector3();
+      const cb = new THREE.Vector3(), ab = new THREE.Vector3();
+
+      for (let i = 0; i < numTriangles; i++) {
+        const i3 = i * 3;
+        pA.fromBufferAttribute(pos, i3);
+        pB.fromBufferAttribute(pos, i3 + 1);
+        pC.fromBufferAttribute(pos, i3 + 2);
+
+        cb.subVectors(pC, pB);
+        ab.subVectors(pA, pB);
+        cb.cross(ab).normalize();
+
+        view.setFloat32(offset, cb.x, true);
+        view.setFloat32(offset + 4, cb.y, true);
+        view.setFloat32(offset + 8, cb.z, true);
+        offset += 12;
+
+        view.setFloat32(offset, pA.x, true);
+        view.setFloat32(offset + 4, pA.y, true);
+        view.setFloat32(offset + 8, pA.z, true);
+        offset += 12;
+
+        view.setFloat32(offset, pB.x, true);
+        view.setFloat32(offset + 4, pB.y, true);
+        view.setFloat32(offset + 8, pB.z, true);
+        offset += 12;
+
+        view.setFloat32(offset, pC.x, true);
+        view.setFloat32(offset + 4, pC.y, true);
+        view.setFloat32(offset + 8, pC.z, true);
+        offset += 12;
+
+        view.setUint16(offset, 0, true);
+        offset += 2;
+      }
+      return buffer;
+    }
+
+    function syncGeometryToSlicer() {
+      if (!loadedMesh) return;
+      const buf = geometryToBinaryStl(loadedMesh.geometry);
+      currentStlBase64 = arrayBufferToBase64(buf);
+      if (additionalModelsBase64.length > 0) {
+        additionalModelsBase64 = additionalModelsBase64.map(() => currentStlBase64);
+      }
+      triggerDebouncedSlice();
+    }
+
+    // --- Model Transformations: Rotate, Scale, Lay Flat ---
+    function rotateModel(axis, angleDeg) {
+      if (!loadedMesh) return;
+      const rad = THREE.MathUtils.degToRad(angleDeg);
+      const q = new THREE.Quaternion();
+      if (axis === 'x') q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), rad);
+      else if (axis === 'y') q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rad);
+      else if (axis === 'z') q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), rad);
+
+      loadedMesh.geometry.applyQuaternion(q);
+      loadedMesh.geometry.computeVertexNormals();
+      centerAndDropToBed(loadedMesh.geometry);
+      updateModelInfo();
+      syncGeometryToSlicer();
+    }
+
+    let currentScalePercent = 100;
+    function setScalePercent(newPercent) {
+      if (!loadedMesh) return;
+      newPercent = Math.max(10, Math.min(500, Math.round(newPercent)));
+      const factor = newPercent / currentScalePercent;
+      loadedMesh.geometry.scale(factor, factor, factor);
+      currentScalePercent = newPercent;
+      const inp = document.getElementById('inp-scale');
+      if (inp) inp.value = newPercent;
+      const val = document.getElementById('val-scale');
+      if (val) val.innerText = `${newPercent}%`;
+      centerAndDropToBed(loadedMesh.geometry);
+      updateModelInfo();
+      syncGeometryToSlicer();
+    }
+
+    function placeFaceOnBed(faceNormal) {
+      if (!loadedMesh) return;
+      const targetNormal = new THREE.Vector3(0, 0, -1);
+      const q = new THREE.Quaternion().setFromUnitVectors(faceNormal, targetNormal);
+      loadedMesh.geometry.applyQuaternion(q);
+      loadedMesh.geometry.computeVertexNormals();
+      centerAndDropToBed(loadedMesh.geometry);
+      updateModelInfo();
+      syncGeometryToSlicer();
+    }
+
+    function autoLayFlat() {
+      if (!loadedMesh) return;
+      const geom = loadedMesh.geometry.index ? loadedMesh.geometry.toNonIndexed() : loadedMesh.geometry;
+      const pos = geom.attributes.position;
+      const count = pos.count;
+      if (count < 3) return;
+
+      const pA = new THREE.Vector3(), pB = new THREE.Vector3(), pC = new THREE.Vector3();
+      const ab = new THREE.Vector3(), ac = new THREE.Vector3(), norm = new THREE.Vector3();
+      const buckets = new Map();
+
+      for (let i = 0; i < count; i += 3) {
+        pA.fromBufferAttribute(pos, i);
+        pB.fromBufferAttribute(pos, i + 1);
+        pC.fromBufferAttribute(pos, i + 2);
+        ab.subVectors(pB, pA);
+        ac.subVectors(pC, pA);
+        norm.crossVectors(ab, ac);
+        const area = norm.length() * 0.5;
+        if (area < 1e-4) continue;
+        norm.normalize();
+
+        const qx = Math.round(norm.x * 20) / 20;
+        const qy = Math.round(norm.y * 20) / 20;
+        const qz = Math.round(norm.z * 20) / 20;
+        const key = `${qx.toFixed(2)},${qy.toFixed(2)},${qz.toFixed(2)}`;
+
+        const entry = buckets.get(key) || { area: 0, normal: new THREE.Vector3() };
+        entry.area += area;
+        entry.normal.add(norm);
+        buckets.set(key, entry);
+      }
+
+      let bestEntry = null;
+      for (let entry of buckets.values()) {
+        if (!bestEntry || entry.area > bestEntry.area) {
+          bestEntry = entry;
+        }
+      }
+
+      if (bestEntry) {
+        placeFaceOnBed(bestEntry.normal.normalize());
+      }
+    }
+
+    // --- Interactive "Place on Face" Tool (PrusaSlicer-style) ---
+    let isPlaceOnFaceMode = false;
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let hoveredFaceNormal = null;
+
+    const indicatorGeo = new THREE.RingGeometry(0.8, 6.0, 32);
+    const indicatorMat = new THREE.MeshBasicMaterial({
+      color: 0x06b6d4,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.85,
+      depthTest: false
+    });
+    const faceIndicator = new THREE.Mesh(indicatorGeo, indicatorMat);
+    faceIndicator.visible = false;
+    faceIndicator.renderOrder = 999;
+    scene.add(faceIndicator);
+
+    function enterPlaceOnFaceMode() {
+      if (!loadedMesh) return;
+      isPlaceOnFaceMode = true;
+      document.getElementById('place-face-banner').style.display = 'flex';
+      document.getElementById('btn-place-face').classList.add('active');
+      renderer.domElement.style.cursor = 'crosshair';
+    }
+
+    function exitPlaceOnFaceMode() {
+      isPlaceOnFaceMode = false;
+      faceIndicator.visible = false;
+      hoveredFaceNormal = null;
+      document.getElementById('place-face-banner').style.display = 'none';
+      document.getElementById('btn-place-face').classList.remove('active');
+      renderer.domElement.style.cursor = 'default';
+    }
+
+    function togglePlaceOnFaceMode() {
+      if (isPlaceOnFaceMode) exitPlaceOnFaceMode();
+      else enterPlaceOnFaceMode();
+    }
+
+    // --- Duplicate on Bed Plater ---
+    function duplicateModel() {
+      if (!currentStlBase64) return;
+      additionalModelsBase64.push(currentStlBase64);
+      const count = additionalModelsBase64.length + 1;
+      document.getElementById('val-copies').innerText = `${count} copies`;
+      triggerDebouncedSlice();
+    }
+
+    function clearCopies() {
+      additionalModelsBase64 = [];
+      document.getElementById('val-copies').innerText = '1 copy';
+      triggerDebouncedSlice();
+    }
+
     // --- Slicing API Request & Auto-Slice ---
     const sliceBtn = document.getElementById('slice-btn');
     const sliceSpinner = document.getElementById('slice-spinner');
@@ -789,7 +1103,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     // Auto-slice when any setting input, range, select, or checkbox changes (500ms debounce)
     const sidebar = document.getElementById('sidebar');
     const handleSettingChange = (e) => {
-      if (e.target && e.target.id && e.target.id.startsWith('inp-')) {
+      if (e.target && e.target.id && e.target.id.startsWith('inp-') && e.target.id !== 'inp-scale') {
         triggerDebouncedSlice();
       }
     };
@@ -798,6 +1112,80 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     sliceBtn.addEventListener('click', () => {
       performSlice(false);
+    });
+
+    // Model tools listeners (Rotate, Orient, Scale, Duplicate)
+    document.getElementById('btn-rot-x').addEventListener('click', () => rotateModel('x', 90));
+    document.getElementById('btn-rot-y').addEventListener('click', () => rotateModel('y', 90));
+    document.getElementById('btn-rot-z').addEventListener('click', () => rotateModel('z', 90));
+    document.getElementById('btn-place-face').addEventListener('click', togglePlaceOnFaceMode);
+    document.getElementById('btn-auto-flat').addEventListener('click', autoLayFlat);
+    document.getElementById('btn-cancel-place-face').addEventListener('click', exitPlaceOnFaceMode);
+
+    document.getElementById('inp-scale').addEventListener('input', (e) => {
+      setScalePercent(parseFloat(e.target.value));
+    });
+    document.getElementById('btn-scale-minus').addEventListener('click', () => {
+      setScalePercent(currentScalePercent - 10);
+    });
+    document.getElementById('btn-scale-plus').addEventListener('click', () => {
+      setScalePercent(currentScalePercent + 10);
+    });
+    document.getElementById('btn-scale-reset').addEventListener('click', () => {
+      setScalePercent(100);
+    });
+
+    document.getElementById('btn-duplicate').addEventListener('click', duplicateModel);
+    document.getElementById('btn-clear-copies').addEventListener('click', clearCopies);
+
+    // Pointer events for raycasting face selection
+    let pointerDownPos = { x: 0, y: 0 };
+    window.addEventListener('pointerdown', (e) => {
+      pointerDownPos = { x: e.clientX, y: e.clientY };
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if (!isPlaceOnFaceMode || !loadedMesh) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObject(loadedMesh, false);
+
+      if (intersects.length > 0 && intersects[0].face) {
+        const hit = intersects[0];
+        const norm = hit.face.normal.clone().transformDirection(loadedMesh.matrixWorld).normalize();
+        hoveredFaceNormal = norm;
+
+        faceIndicator.position.copy(hit.point).addScaledVector(norm, 0.2);
+        faceIndicator.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), norm);
+        faceIndicator.visible = true;
+      } else {
+        faceIndicator.visible = false;
+        hoveredFaceNormal = null;
+      }
+    });
+
+    renderer.domElement.addEventListener('pointerup', (e) => {
+      if (!isPlaceOnFaceMode || !loadedMesh) return;
+      const dist = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
+      if (dist > 5) return; // user orbited camera, do not select face
+
+      if (hoveredFaceNormal) {
+        placeFaceOnBed(hoveredFaceNormal);
+        exitPlaceOnFaceMode();
+      }
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isPlaceOnFaceMode) {
+        exitPlaceOnFaceMode();
+      } else if ((e.key === 'f' || e.key === 'F') && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+        togglePlaceOnFaceMode();
+      } else if ((e.key === 'd' || e.key === 'D') && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+        duplicateModel();
+      }
     });
 
     function onSliceSuccess(data) {
