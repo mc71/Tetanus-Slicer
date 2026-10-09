@@ -302,19 +302,56 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         })
         .collect();
 
-    // Step 5b: Support generation across layers if enabled
-    let support_data: Vec<(Vec<Polygon2>, Vec<crate::geom::Segment2>)> = if config.support_enabled {
-        let layers_outer_polys: Vec<Vec<Polygon2>> = layer_contours
-            .iter()
-            .map(|contours| {
-                contours
-                    .iter()
-                    .filter(|c| c.role == ContourRole::Outer)
-                    .map(|c| c.polygon.clone())
-                    .collect()
-            })
-            .collect();
+    // Step 5b: Extract outer polygons and precompute layer areas
+    let layers_outer_polys: Vec<Vec<Polygon2>> = layer_contours
+        .iter()
+        .map(|contours| {
+            contours
+                .iter()
+                .filter(|c| c.role == ContourRole::Outer)
+                .map(|c| c.polygon.clone())
+                .collect()
+        })
+        .collect();
 
+    let layer_areas: Vec<f64> = layers_outer_polys
+        .iter()
+        .map(|polys| polys.iter().map(|p| p.signed_area().abs()).sum())
+        .collect();
+
+    // Identify ALL top solid roof and bottom solid floor layers throughout the model
+    let mut is_solid_layer = vec![false; layer_count];
+    for idx in 0..config.bottom_solid_layers.min(layer_count) {
+        is_solid_layer[idx] = true;
+    }
+    for idx in layer_count.saturating_sub(config.top_solid_layers)..layer_count {
+        is_solid_layer[idx] = true;
+    }
+    // Intermediate roofs (e.g. deck, cabin roof, cargo steps)
+    for i in 0..(layer_count.saturating_sub(1)) {
+        let curr_area = layer_areas[i];
+        let next_area = layer_areas[i + 1];
+        if curr_area > next_area + 15.0 {
+            let start = i.saturating_sub(config.top_solid_layers.saturating_sub(1));
+            for k in start..=i {
+                is_solid_layer[k] = true;
+            }
+        }
+    }
+    // Intermediate floors
+    for i in 1..layer_count {
+        let curr_area = layer_areas[i];
+        let prev_area = layer_areas[i - 1];
+        if curr_area > prev_area + 15.0 {
+            let end = (i + config.bottom_solid_layers).min(layer_count);
+            for k in i..end {
+                is_solid_layer[k] = true;
+            }
+        }
+    }
+
+    // Step 5c: Support generation across layers if enabled
+    let support_data: Vec<(Vec<Polygon2>, Vec<crate::geom::Segment2>)> = if config.support_enabled {
         let sup_cfg = SupportConfig {
             enabled: true,
             overhang_angle: config.support_angle,
@@ -328,7 +365,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         vec![(Vec::new(), Vec::new()); layer_count]
     };
 
-    // Step 5c: Parallel toolpath generation
+    // Step 5d: Parallel toolpath generation
     let processed_layers: Vec<ProcessedLayer> = (0..layer_count)
         .into_par_iter()
         .map(|layer_idx| {
@@ -384,8 +421,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             };
 
             // Top and Bottom Solid Shells (100% rectilinear density)
-            let is_solid = layer_idx < config.bottom_solid_layers
-                || layer_idx >= layer_count.saturating_sub(config.top_solid_layers);
+            let is_solid = is_solid_layer[layer_idx];
             let (pattern, layer_infill_density) = if is_solid {
                 (InfillPattern::Rectilinear, 1.0)
             } else {
