@@ -403,48 +403,47 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     // --- Client-side 3MF Parser & Renderer ---
     async function load3mfToScene(buffer) {
       const zip = await JSZip.loadAsync(buffer);
-      let modelXml = null;
+      const parser = new DOMParser();
+      const triPositions = [];
+
       for (let fname of Object.keys(zip.files)) {
         if (fname.endsWith('.model')) {
-          modelXml = await zip.files[fname].async('text');
-          break;
+          const modelXml = await zip.files[fname].async('text');
+          const doc = parser.parseFromString(modelXml, 'text/xml');
+          const modelEl = doc.querySelector('model');
+          const unit = modelEl ? modelEl.getAttribute('unit') : 'millimeter';
+          let scale = 1.0;
+          if (unit === 'meter') scale = 1000.0;
+          else if (unit === 'centimeter') scale = 10.0;
+          else if (unit === 'inch') scale = 25.4;
+          else if (unit === 'micron') scale = 0.001;
+
+          const vertexEls = doc.querySelectorAll('vertex');
+          const vertices = [];
+          vertexEls.forEach(v => {
+            vertices.push(
+              parseFloat(v.getAttribute('x')) * scale,
+              parseFloat(v.getAttribute('y')) * scale,
+              parseFloat(v.getAttribute('z')) * scale
+            );
+          });
+
+          const triangleEls = doc.querySelectorAll('triangle');
+          triangleEls.forEach(t => {
+            const v1 = parseInt(t.getAttribute('v1'));
+            const v2 = parseInt(t.getAttribute('v2'));
+            const v3 = parseInt(t.getAttribute('v3'));
+            if (v1 * 3 + 2 >= vertices.length || v2 * 3 + 2 >= vertices.length || v3 * 3 + 2 >= vertices.length) return;
+            triPositions.push(
+              vertices[v1 * 3], vertices[v1 * 3 + 1], vertices[v1 * 3 + 2],
+              vertices[v2 * 3], vertices[v2 * 3 + 1], vertices[v2 * 3 + 2],
+              vertices[v3 * 3], vertices[v3 * 3 + 1], vertices[v3 * 3 + 2]
+            );
+          });
         }
       }
-      if (!modelXml) throw new Error('No .model file found in 3MF archive');
 
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(modelXml, 'text/xml');
-      const modelEl = doc.querySelector('model');
-      const unit = modelEl ? modelEl.getAttribute('unit') : 'millimeter';
-      let scale = 1.0;
-      if (unit === 'meter') scale = 1000.0;
-      else if (unit === 'centimeter') scale = 10.0;
-      else if (unit === 'inch') scale = 25.4;
-      else if (unit === 'micron') scale = 0.001;
-
-      const vertexEls = doc.querySelectorAll('vertex');
-      const vertices = [];
-      vertexEls.forEach(v => {
-        vertices.push(
-          parseFloat(v.getAttribute('x')) * scale,
-          parseFloat(v.getAttribute('y')) * scale,
-          parseFloat(v.getAttribute('z')) * scale
-        );
-      });
-
-      const triangleEls = doc.querySelectorAll('triangle');
-      const triPositions = [];
-      triangleEls.forEach(t => {
-        const v1 = parseInt(t.getAttribute('v1'));
-        const v2 = parseInt(t.getAttribute('v2'));
-        const v3 = parseInt(t.getAttribute('v3'));
-        if (v1 * 3 + 2 >= vertices.length || v2 * 3 + 2 >= vertices.length || v3 * 3 + 2 >= vertices.length) return;
-        triPositions.push(
-          vertices[v1 * 3], vertices[v1 * 3 + 1], vertices[v1 * 3 + 2],
-          vertices[v2 * 3], vertices[v2 * 3 + 1], vertices[v2 * 3 + 2],
-          vertices[v3 * 3], vertices[v3 * 3 + 1], vertices[v3 * 3 + 2]
-        );
-      });
+      if (triPositions.length === 0) throw new Error('No 3D meshes found in 3MF archive');
 
       const geom = new THREE.BufferGeometry();
       geom.setAttribute('position', new THREE.Float32BufferAttribute(triPositions, 3));
