@@ -14,10 +14,16 @@ impl Mesh {
     pub fn load_stl<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let file = File::open(&path).map_err(|e| format!("Failed to open file: {}", e))?;
         let mut reader = BufReader::new(file);
-
-        // Check file size to distinguish ASCII vs Binary
         let file_len = reader.get_ref().metadata().map_err(|e| e.to_string())?.len();
+        Self::from_reader(&mut reader, file_len)
+    }
 
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, String> {
+        let mut cursor = std::io::Cursor::new(bytes);
+        Self::from_reader(&mut cursor, bytes.len() as u64)
+    }
+
+    pub fn from_reader<R: Read + Seek>(reader: &mut R, file_len: u64) -> Result<Self, String> {
         let mut header = [0u8; 80];
         reader.read_exact(&mut header).map_err(|e| e.to_string())?;
 
@@ -32,16 +38,16 @@ impl Mesh {
             if expected_binary_len == file_len {
                 // It's actually a binary STL with "solid" in the 80-byte header
                 reader.seek(SeekFrom::Start(84)).map_err(|e| e.to_string())?;
-                return Self::parse_binary_stl(&mut reader, num_triangles);
+                return Self::parse_binary_stl(reader, num_triangles);
             } else {
                 // Parse as ASCII
                 reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-                return Self::parse_ascii_stl(&mut reader);
+                return Self::parse_ascii_stl(reader);
             }
         }
 
         let num_triangles = reader.read_u32::<LittleEndian>().map_err(|e| e.to_string())?;
-        Self::parse_binary_stl(&mut reader, num_triangles)
+        Self::parse_binary_stl(reader, num_triangles)
     }
 
     fn parse_binary_stl<R: Read>(reader: &mut R, count: u32) -> Result<Self, String> {

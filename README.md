@@ -19,18 +19,32 @@ A standalone, high-performance 3D slicing engine written in pure Rust.
 cargo build --release
 ```
 
-### Run
-Slice an STL file into G-code:
+### Web GUI Mode (Interactive 3D Viewport)
+Launch the embedded web server and open the interactive 3D slicer in your browser:
 ```bash
-./target/release/rust_slicer path/to/model.stl output.gcode --layer-height 0.2 --perimeters 2 --infill 0.20
+./target/release/tetanus-slicer --web
+```
+Then navigate to **`http://localhost:8080`**.
+* **3D Build Plate**: 220 × 220 mm bed grid with orbit/zoom controls.
+* **Drag-and-Drop STL**: Drop any STL file onto the viewport for instant 3D rendering.
+* **Instant Slicing**: Slices models in milliseconds powered by the native multi-core Rust engine.
+* **Interactive Toolpath Scrubber**: Scrub through layers, inspect color-coded outer walls, inner walls, and infill, and auto-play the print buildup.
+* **One-Click G-code Export**: Download the sliced `.gcode` file ready for printing.
+
+### CLI Mode
+Slice an STL file directly from the terminal:
+```bash
+./target/release/tetanus-slicer path/to/model.stl output.gcode --layer-height 0.2 --perimeters 2 --infill 0.20
 ```
 
-If run without arguments, it automatically generates a `cube.stl` calibration cube and slices it:
+If run without arguments, it generates a `cube.stl` calibration cube and slices it:
 ```bash
-./target/release/rust_slicer
+./target/release/tetanus-slicer
 ```
 
-### Options
+### CLI Options
+* `--web` / `-w`: Start the embedded interactive Web GUI server
+* `--port <n>`: Port for the web server (default: `8080`)
 * `--layer-height <mm>`: Layer thickness (default: `0.20`)
 * `--perimeters <n>`: Number of wall shells (default: `2`)
 * `--infill <float>`: Infill ratio between 0.0 and 1.0 (default: `0.20` for 20%)

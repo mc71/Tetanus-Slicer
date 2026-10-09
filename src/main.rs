@@ -5,6 +5,8 @@ mod infill;
 mod perimeter;
 mod slicer;
 mod stl;
+mod web;
+mod web_ui;
 
 use std::env;
 use std::fs::File;
@@ -23,6 +25,19 @@ use stl::Mesh;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    if args.iter().any(|a| a == "--web" || a == "--gui" || a == "-w") {
+        let port: u16 = args
+            .windows(2)
+            .find(|w| w[0] == "--port" || w[0] == "-p")
+            .and_then(|w| w[1].parse().ok())
+            .unwrap_or(8080);
+        if let Err(e) = web::start_web_server(port) {
+            eprintln!("Web server error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let input_path = if args.len() > 1 && !args[1].starts_with("--") {
         args[1].clone()
