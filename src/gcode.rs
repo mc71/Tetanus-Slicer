@@ -257,19 +257,47 @@ impl<'a> GCodeWriter<'a> {
         self.travel_to(w, poly.points[0], layer_z)?;
         let feedrate = speed * 60.0;
 
-        for i in 0..n {
-            let next_pt = poly.points[(i + 1) % n];
-            let dist = self.current_pos.distance_to(next_pt);
-            let e = self.calculate_e(dist);
-            self.total_print_dist_mm += dist;
-            self.total_e += e;
-            self.total_time_secs += move_time(dist, speed, 1200.0);
-            writeln!(
-                w,
-                "G1 X{:.3} Y{:.3} E{:.4} F{:.1}",
-                next_pt.x, next_pt.y, e, feedrate
-            )?;
-            self.current_pos = next_pt;
+        let commands = crate::arc::ArcFitter::fit_arcs(&poly.points, true, 0.02);
+
+        for cmd in commands {
+            match cmd {
+                crate::arc::PathSegment::Linear { end } => {
+                    let dist = self.current_pos.distance_to(end);
+                    let e = self.calculate_e(dist);
+                    self.total_print_dist_mm += dist;
+                    self.total_e += e;
+                    self.total_time_secs += move_time(dist, speed, 1200.0);
+                    writeln!(
+                        w,
+                        "G1 X{:.3} Y{:.3} E{:.4} F{:.1}",
+                        end.x, end.y, e, feedrate
+                    )?;
+                    self.current_pos = end;
+                }
+                crate::arc::PathSegment::Arc { end, i, j, radius, clockwise } => {
+                    let start = self.current_pos;
+                    let center = Point2::new(start.x + i, start.y + j);
+                    let a1 = (start.y - center.y).atan2(start.x - center.x);
+                    let a2 = (end.y - center.y).atan2(end.x - center.x);
+                    let mut d_theta = if clockwise { a1 - a2 } else { a2 - a1 };
+                    while d_theta < 0.0 { d_theta += std::f64::consts::TAU; }
+                    while d_theta >= std::f64::consts::TAU { d_theta -= std::f64::consts::TAU; }
+                    let arc_len = radius * d_theta;
+
+                    let e = self.calculate_e(arc_len);
+                    self.total_print_dist_mm += arc_len;
+                    self.total_e += e;
+                    self.total_time_secs += move_time(arc_len, speed, 1200.0);
+
+                    let g_cmd = if clockwise { "G2" } else { "G3" };
+                    writeln!(
+                        w,
+                        "{} X{:.3} Y{:.3} I{:.3} J{:.3} E{:.4} F{:.1}",
+                        g_cmd, end.x, end.y, i, j, e, feedrate
+                    )?;
+                    self.current_pos = end;
+                }
+            }
         }
 
         Ok(())

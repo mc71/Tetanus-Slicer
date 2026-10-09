@@ -95,6 +95,7 @@ struct BuildItem {
 }
 
 struct ModelFileDef {
+    #[allow(dead_code)]
     unit_scale: f64,
     objects: HashMap<String, ObjectContent>,
     build_items: Vec<BuildItem>,

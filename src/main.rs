@@ -1,3 +1,4 @@
+mod arc;
 mod bvh;
 mod geom;
 mod gcode;
