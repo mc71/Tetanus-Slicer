@@ -19,9 +19,10 @@ use rayon::prelude::*;
 
 use bvh::TriangleIntervalIndex;
 use gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
+use geom::Polygon2;
 use infill::InfillGenerator;
 use perimeter::PerimeterGenerator;
-use slicer::Slicer;
+use slicer::{ContourRole, Slicer};
 use stl::Mesh;
 
 fn main() {
@@ -162,10 +163,44 @@ fn main() {
                 perimeters.push(perim_loops);
             }
 
+            // Skirt and Brim on layer 0
+            let skirt_brim = if layer_idx == 0 {
+                let mut sb = Vec::new();
+                let outer_polys: Vec<Polygon2> = contours
+                    .iter()
+                    .filter(|c| c.role == ContourRole::Outer)
+                    .map(|c| c.polygon.clone())
+                    .collect();
+
+                if config.brim_width > 0.0 {
+                    sb.extend(PerimeterGenerator::generate_brim(
+                        &outer_polys,
+                        config.brim_width,
+                        config.line_width,
+                    ));
+                }
+                if config.skirt_loops > 0 {
+                    sb.extend(PerimeterGenerator::generate_skirt(
+                        &outer_polys,
+                        config.skirt_loops,
+                        config.skirt_distance,
+                        config.line_width,
+                    ));
+                }
+                sb
+            } else {
+                Vec::new()
+            };
+
+            // Top and Bottom Solid Shells (100% rectilinear density)
+            let is_solid = layer_idx < config.bottom_solid_layers
+                || layer_idx >= layer_count.saturating_sub(config.top_solid_layers);
+            let layer_infill_density = if is_solid { 1.0 } else { infill_density };
+
             // Generate infill across all boundaries with automatic hole exclusion
             let infill = InfillGenerator::generate_rectilinear(
                 &infill_boundaries,
-                infill_density,
+                layer_infill_density,
                 config.line_width,
                 layer_idx,
             );
@@ -173,6 +208,7 @@ fn main() {
             ProcessedLayer {
                 layer_index: layer_idx,
                 z,
+                skirt_brim,
                 perimeters,
                 infill,
             }

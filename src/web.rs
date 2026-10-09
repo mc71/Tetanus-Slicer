@@ -6,10 +6,10 @@ use tiny_http::{Header, Response, Server, StatusCode};
 
 use crate::bvh::TriangleIntervalIndex;
 use crate::gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
-use crate::geom::Point3;
+use crate::geom::{Point3, Polygon2};
 use crate::infill::InfillGenerator;
 use crate::perimeter::PerimeterGenerator;
-use crate::slicer::Slicer;
+use crate::slicer::{ContourRole, Slicer};
 use crate::stl::Mesh;
 use crate::web_ui::INDEX_HTML;
 
@@ -28,6 +28,18 @@ pub struct SliceRequest {
     pub nozzle_temp: u32,
     #[serde(default = "default_bed_temp")]
     pub bed_temp: u32,
+    #[serde(default = "default_top_solid")]
+    pub top_solid_layers: usize,
+    #[serde(default = "default_bottom_solid")]
+    pub bottom_solid_layers: usize,
+    #[serde(default = "default_skirt_loops")]
+    pub skirt_loops: usize,
+    #[serde(default = "default_brim_width")]
+    pub brim_width: f64,
+    #[serde(default = "default_z_hop")]
+    pub z_hop: f64,
+    #[serde(default = "default_fan_speed")]
+    pub fan_speed: u8,
 }
 
 fn default_layer_height() -> f64 { 0.20 }
@@ -36,6 +48,12 @@ fn default_infill() -> f64 { 0.20 }
 fn default_speed() -> f64 { 50.0 }
 fn default_nozzle_temp() -> u32 { 210 }
 fn default_bed_temp() -> u32 { 60 }
+fn default_top_solid() -> usize { 4 }
+fn default_bottom_solid() -> usize { 4 }
+fn default_skirt_loops() -> usize { 2 }
+fn default_brim_width() -> f64 { 0.0 }
+fn default_z_hop() -> f64 { 0.2 }
+fn default_fan_speed() -> u8 { 255 }
 
 #[derive(Serialize)]
 pub struct SliceResponse {
@@ -50,6 +68,7 @@ pub struct SliceResponse {
 pub struct WebLayer {
     pub index: usize,
     pub z: f64,
+    pub skirt_brim: Vec<Vec<[f64; 2]>>,
     pub perimeters: Vec<Vec<[f64; 2]>>,
     pub infill: Vec<[[f64; 2]; 2]>,
 }
@@ -234,9 +253,18 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         filament_diameter: 1.75,
         print_speed_perimeter: req.print_speed * 0.8,
         print_speed_infill: req.print_speed,
+        first_layer_speed: (req.print_speed * 0.5).max(15.0),
         travel_speed: 150.0,
         retract_dist: 0.8,
         retract_speed: 35.0,
+        z_hop: req.z_hop,
+        top_solid_layers: req.top_solid_layers,
+        bottom_solid_layers: req.bottom_solid_layers,
+        skirt_loops: req.skirt_loops,
+        skirt_distance: 4.0,
+        brim_width: req.brim_width,
+        fan_speed: req.fan_speed,
+        fan_below_layer: 1,
     };
 
     let processed_layers: Vec<ProcessedLayer> = (0..layer_count)
@@ -272,9 +300,43 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 perimeters.push(perim_loops);
             }
 
+            // Skirt and Brim on layer 0
+            let skirt_brim = if layer_idx == 0 {
+                let mut sb = Vec::new();
+                let outer_polys: Vec<Polygon2> = contours
+                    .iter()
+                    .filter(|c| c.role == ContourRole::Outer)
+                    .map(|c| c.polygon.clone())
+                    .collect();
+
+                if config.brim_width > 0.0 {
+                    sb.extend(PerimeterGenerator::generate_brim(
+                        &outer_polys,
+                        config.brim_width,
+                        config.line_width,
+                    ));
+                }
+                if config.skirt_loops > 0 {
+                    sb.extend(PerimeterGenerator::generate_skirt(
+                        &outer_polys,
+                        config.skirt_loops,
+                        config.skirt_distance,
+                        config.line_width,
+                    ));
+                }
+                sb
+            } else {
+                Vec::new()
+            };
+
+            // Top and Bottom Solid Shells (100% rectilinear density)
+            let is_solid = layer_idx < config.bottom_solid_layers
+                || layer_idx >= layer_count.saturating_sub(config.top_solid_layers);
+            let layer_infill_density = if is_solid { 1.0 } else { req.infill_density };
+
             let infill = InfillGenerator::generate_rectilinear(
                 &infill_boundaries,
-                req.infill_density,
+                layer_infill_density,
                 config.line_width,
                 layer_idx,
             );
@@ -282,6 +344,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             ProcessedLayer {
                 layer_index: layer_idx,
                 z,
+                skirt_brim,
                 perimeters,
                 infill,
             }
@@ -298,6 +361,12 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     let web_layers: Vec<WebLayer> = processed_layers
         .into_iter()
         .map(|l| {
+            let skirt_brim = l
+                .skirt_brim
+                .into_iter()
+                .map(|p| p.points.into_iter().map(|pt| [pt.x, pt.y]).collect::<Vec<[f64; 2]>>())
+                .collect();
+
             let perimeters = l
                 .perimeters
                 .into_iter()
@@ -317,6 +386,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             WebLayer {
                 index: l.layer_index,
                 z: l.z,
+                skirt_brim,
                 perimeters,
                 infill,
             }

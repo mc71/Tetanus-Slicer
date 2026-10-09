@@ -169,6 +169,38 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <div class="field-header"><label>Infill Density</label><span id="val-infill">20%</span></div>
       <input type="range" id="inp-infill" min="0" max="100" step="5" value="20">
     </div>
+    <div class="grid-2">
+      <div class="field">
+        <div class="field-header"><label>Top Shells</label><span id="val-top-solid">4</span></div>
+        <input type="range" id="inp-top-solid" min="0" max="10" step="1" value="4">
+      </div>
+      <div class="field">
+        <div class="field-header"><label>Bottom Shells</label><span id="val-bottom-solid">4</span></div>
+        <input type="range" id="inp-bottom-solid" min="0" max="10" step="1" value="4">
+      </div>
+    </div>
+
+    <div class="section-title">Adhesion & Retraction</div>
+    <div class="grid-2">
+      <div class="field">
+        <div class="field-header"><label>Skirt Loops</label><span id="val-skirt">2</span></div>
+        <input type="range" id="inp-skirt" min="0" max="6" step="1" value="2">
+      </div>
+      <div class="field">
+        <div class="field-header"><label>Brim Width</label><span id="val-brim">0 mm</span></div>
+        <input type="range" id="inp-brim" min="0" max="15" step="1" value="0">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="field">
+        <div class="field-header"><label>Z-Hop</label><span id="val-z-hop">0.20 mm</span></div>
+        <input type="range" id="inp-z-hop" min="0" max="1.0" step="0.05" value="0.20">
+      </div>
+      <div class="field">
+        <div class="field-header"><label>Cooling Fan</label><span id="val-fan">100%</span></div>
+        <input type="range" id="inp-fan" min="0" max="255" step="15" value="255">
+      </div>
+    </div>
 
     <div class="section-title">Speeds & Thermal</div>
     <div class="grid-2">
@@ -200,6 +232,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <input type="range" id="layer-slider" min="1" max="100" value="100">
     <div class="scrubber-header">
       <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div> Skirt/Brim</div>
         <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Outer Wall</div>
         <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Inner Wall</div>
         <div class="legend-item"><div class="legend-dot" style="background:#06b6d4"></div> Infill</div>
@@ -291,18 +324,32 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     animate();
 
     // --- UI Listeners & Sliders ---
-    function linkSlider(id, targetId, unit, mult = 1) {
+    function linkSlider(id, targetId, unit, mult = 1, decimals = null) {
       const inp = document.getElementById(id);
       const val = document.getElementById(targetId);
+      if (!inp || !val) return;
       inp.addEventListener('input', () => {
-        val.innerText = (parseFloat(inp.value) * mult).toFixed(mult < 1 ? 2 : 0) + unit;
+        const dec = decimals !== null ? decimals : (mult < 1 || (inp.step && inp.step.includes('.')) ? 2 : 0);
+        val.innerText = (parseFloat(inp.value) * mult).toFixed(dec) + unit;
       });
     }
     linkSlider('inp-layer-height', 'val-layer-height', ' mm', 1);
     linkSlider('inp-perimeters', 'val-perimeters', '', 1);
     linkSlider('inp-infill', 'val-infill', '%', 1);
+    linkSlider('inp-top-solid', 'val-top-solid', '', 1);
+    linkSlider('inp-bottom-solid', 'val-bottom-solid', '', 1);
+    linkSlider('inp-skirt', 'val-skirt', '', 1);
+    linkSlider('inp-brim', 'val-brim', ' mm', 1);
+    linkSlider('inp-z-hop', 'val-z-hop', ' mm', 1, 2);
     linkSlider('inp-speed', 'val-speed', ' mm/s', 1);
     linkSlider('inp-nozzle', 'val-nozzle', '°C', 1);
+
+    const inpFan = document.getElementById('inp-fan');
+    if (inpFan) {
+      inpFan.addEventListener('input', () => {
+        document.getElementById('val-fan').innerText = Math.round((parseInt(inpFan.value) / 255) * 100) + '%';
+      });
+    }
 
     // --- File Handling (Drop & Browse) ---
     const dropzone = document.getElementById('dropzone');
@@ -503,7 +550,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         infill_density: parseFloat(document.getElementById('inp-infill').value) / 100.0,
         print_speed: parseFloat(document.getElementById('inp-speed').value),
         nozzle_temp: parseInt(document.getElementById('inp-nozzle').value),
-        bed_temp: 60
+        bed_temp: 60,
+        top_solid_layers: parseInt(document.getElementById('inp-top-solid').value),
+        bottom_solid_layers: parseInt(document.getElementById('inp-bottom-solid').value),
+        skirt_loops: parseInt(document.getElementById('inp-skirt').value),
+        brim_width: parseFloat(document.getElementById('inp-brim').value),
+        z_hop: parseFloat(document.getElementById('inp-z-hop').value),
+        fan_speed: parseInt(document.getElementById('inp-fan').value)
       };
 
       try {
@@ -566,6 +619,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const positions = [];
       const colors = [];
 
+      const colSkirt = new THREE.Color(0xa855f7); // Violet/Purple for skirt & brim
       const colOuter = new THREE.Color(0x10b981); // Emerald green
       const colInner = new THREE.Color(0xf59e0b); // Amber
       const colInfill = new THREE.Color(0x06b6d4); // Cyan
@@ -574,6 +628,19 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const layer = slicedData.layers[i];
         if (!layer) continue;
         const z = layer.z;
+
+        // Skirt / Brim
+        if (layer.skirt_brim) {
+          for (let poly of layer.skirt_brim) {
+            const n = poly.length;
+            for (let j = 0; j < n; j++) {
+              const p1 = poly[j];
+              const p2 = poly[(j + 1) % n];
+              positions.push(p1[0], p1[1], z, p2[0], p2[1], z);
+              colors.push(colSkirt.r, colSkirt.g, colSkirt.b, colSkirt.r, colSkirt.g, colSkirt.b);
+            }
+          }
+        }
 
         // Perimeters
         if (layer.perimeters) {
