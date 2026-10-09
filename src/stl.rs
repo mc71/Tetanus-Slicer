@@ -165,4 +165,95 @@ impl Mesh {
             max_bound,
         })
     }
+
+    pub fn translate(&mut self, dx: f64, dy: f64, dz: f64) {
+        let offset = Point3::new(dx, dy, dz);
+        for tri in &mut self.triangles {
+            tri.v[0] = tri.v[0] + offset;
+            tri.v[1] = tri.v[1] + offset;
+            tri.v[2] = tri.v[2] + offset;
+        }
+        self.min_bound = self.min_bound + offset;
+        self.max_bound = self.max_bound + offset;
+    }
+
+    pub fn center_on_bed(&mut self, bed_center_x: f64, bed_center_y: f64) {
+        let cur_cx = (self.min_bound.x + self.max_bound.x) * 0.5;
+        let cur_cy = (self.min_bound.y + self.max_bound.y) * 0.5;
+        let cur_min_z = self.min_bound.z;
+        self.translate(bed_center_x - cur_cx, bed_center_y - cur_cy, -cur_min_z);
+    }
+
+    pub fn combine(meshes: &[Mesh]) -> Mesh {
+        if meshes.is_empty() {
+            return Mesh {
+                triangles: Vec::new(),
+                min_bound: Point3::new(0.0, 0.0, 0.0),
+                max_bound: Point3::new(0.0, 0.0, 0.0),
+            };
+        }
+
+        let mut all_triangles = Vec::new();
+        let mut min_bound = Point3::new(f64::MAX, f64::MAX, f64::MAX);
+        let mut max_bound = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+
+        for m in meshes {
+            all_triangles.extend_from_slice(&m.triangles);
+            min_bound.x = min_bound.x.min(m.min_bound.x);
+            min_bound.y = min_bound.y.min(m.min_bound.y);
+            min_bound.z = min_bound.z.min(m.min_bound.z);
+            max_bound.x = max_bound.x.max(m.max_bound.x);
+            max_bound.y = max_bound.y.max(m.max_bound.y);
+            max_bound.z = max_bound.z.max(m.max_bound.z);
+        }
+
+        Mesh {
+            triangles: all_triangles,
+            min_bound,
+            max_bound,
+        }
+    }
+
+    /// Auto-arrange multiple meshes on the print bed with a safety margin gap between parts.
+    pub fn auto_arrange(meshes: &mut [Mesh], gap: f64) {
+        if meshes.is_empty() {
+            return;
+        }
+        if meshes.len() == 1 {
+            meshes[0].center_on_bed(0.0, 0.0);
+            return;
+        }
+
+        let cols = (meshes.len() as f64).sqrt().ceil() as usize;
+        let mut row_max_h = 0.0;
+        let mut cur_x = 0.0;
+        let mut cur_y = 0.0;
+        let mut positions = Vec::with_capacity(meshes.len());
+
+        for (i, m) in meshes.iter().enumerate() {
+            let width = m.max_bound.x - m.min_bound.x;
+            let depth = m.max_bound.y - m.min_bound.y;
+
+            if i > 0 && i % cols == 0 {
+                cur_x = 0.0;
+                cur_y += row_max_h + gap;
+                row_max_h = 0.0;
+            }
+
+            positions.push((cur_x + width * 0.5, cur_y + depth * 0.5));
+            cur_x += width + gap;
+            row_max_h = row_max_h.max(depth);
+        }
+
+        let total_w = cur_x;
+        let total_d = cur_y + row_max_h;
+        let offset_x = -total_w * 0.5;
+        let offset_y = -total_d * 0.5;
+
+        for (i, m) in meshes.iter_mut().enumerate() {
+            let target_cx = positions[i].0 + offset_x;
+            let target_cy = positions[i].1 + offset_y;
+            m.center_on_bed(target_cx, target_cy);
+        }
+    }
 }

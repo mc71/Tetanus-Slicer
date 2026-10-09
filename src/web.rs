@@ -6,7 +6,7 @@ use tiny_http::{Header, Response, Server, StatusCode};
 
 use crate::bvh::TriangleIntervalIndex;
 use crate::gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
-use crate::geom::{Point3, Polygon2};
+use crate::geom::Polygon2;
 use crate::infill::{InfillGenerator, InfillPattern};
 use crate::perimeter::PerimeterGenerator;
 use crate::slicer::{ContourRole, Slicer};
@@ -17,6 +17,8 @@ use crate::web_ui::INDEX_HTML;
 #[derive(Deserialize)]
 pub struct SliceRequest {
     pub stl_base64: Option<String>,
+    #[serde(default)]
+    pub additional_models_base64: Vec<String>,
     #[serde(default = "default_layer_height")]
     pub layer_height: f64,
     #[serde(default = "default_perimeters")]
@@ -47,6 +49,14 @@ pub struct SliceRequest {
     pub support_enabled: bool,
     #[serde(default = "default_support_angle")]
     pub support_angle: f64,
+    #[serde(default = "default_seam_position")]
+    pub seam_position: crate::perimeter::SeamPosition,
+    #[serde(default)]
+    pub adaptive_layers: bool,
+    #[serde(default = "default_adaptive_min")]
+    pub adaptive_layer_min: f64,
+    #[serde(default = "default_adaptive_max")]
+    pub adaptive_layer_max: f64,
 }
 
 fn default_layer_height() -> f64 { 0.20 }
@@ -64,6 +74,9 @@ fn default_fan_speed() -> u8 { 255 }
 fn default_infill_pattern() -> InfillPattern { InfillPattern::Rectilinear }
 fn default_support_enabled() -> bool { false }
 fn default_support_angle() -> f64 { 45.0 }
+fn default_seam_position() -> crate::perimeter::SeamPosition { crate::perimeter::SeamPosition::Aligned }
+fn default_adaptive_min() -> f64 { 0.08 }
+fn default_adaptive_max() -> f64 { 0.28 }
 
 #[derive(Serialize)]
 pub struct SliceResponse {
@@ -89,6 +102,7 @@ pub struct WebLayer {
     pub support_infill: Vec<[[f64; 2]; 2]>,
     pub perimeters: Vec<WebPerimeterPath>,
     pub infill: Vec<[[f64; 2]; 2]>,
+    pub seam_points: Vec<[f64; 3]>,
 }
 
 #[derive(Serialize)]
@@ -216,7 +230,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     };
 
     // 2. Parse Mesh (supports both STL and 3MF)
-    let mut mesh = match Mesh::from_slice(&raw_bytes) {
+    let mesh = match Mesh::from_slice(&raw_bytes) {
         Ok(m) => m,
         Err(e) => {
             return SliceResponse {
@@ -239,21 +253,28 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         };
     }
 
-    // 3. Center model on 220x220 build plate, resting on Z = 0
-    let center_x = (mesh.min_bound.x + mesh.max_bound.x) * 0.5;
-    let center_y = (mesh.min_bound.y + mesh.max_bound.y) * 0.5;
-    let min_z = mesh.min_bound.z;
-
-    let offset_x = 110.0 - center_x;
-    let offset_y = 110.0 - center_y;
-    let offset_z = -min_z;
-
-    let offset = Point3::new(offset_x, offset_y, offset_z);
-    for tri in &mut mesh.triangles {
-        tri.v[0] = tri.v[0] + offset;
-        tri.v[1] = tri.v[1] + offset;
-        tri.v[2] = tri.v[2] + offset;
+    // 3. Multi-object Plater & Centering
+    let mut all_meshes = vec![mesh];
+    for add_b64 in &req.additional_models_base64 {
+        if let Ok(b) = BASE64_STANDARD.decode(add_b64.trim()) {
+            if let Ok(m) = Mesh::from_slice(&b) {
+                if !m.triangles.is_empty() {
+                    all_meshes.push(m);
+                }
+            }
+        }
     }
+
+    let mesh = if all_meshes.len() > 1 {
+        Mesh::auto_arrange(&mut all_meshes, 10.0);
+        let mut combined = Mesh::combine(&all_meshes);
+        combined.center_on_bed(110.0, 110.0);
+        combined
+    } else {
+        let mut m = all_meshes.remove(0);
+        m.center_on_bed(110.0, 110.0);
+        m
+    };
 
     let dim_x = mesh.max_bound.x - mesh.min_bound.x;
     let dim_y = mesh.max_bound.y - mesh.min_bound.y;
@@ -262,14 +283,31 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     // 4. Build Spatial Index
     let bvh = TriangleIntervalIndex::build(&mesh.triangles);
 
-    // 5. Slice Layers in Parallel
-    let layer_height = req.layer_height.max(0.04);
-    let layer_count = (dim_z / layer_height).ceil().max(1.0) as usize;
+    // 5. Slice Layers in Parallel (Variable or Uniform)
+    let (layer_specs, layer_count) = if req.adaptive_layers {
+        let specs = crate::adaptive::AdaptiveLayers::compute_layer_heights(
+            &bvh,
+            mesh.min_bound.z,
+            mesh.max_bound.z,
+            req.layer_height,
+            req.adaptive_layer_min,
+            req.adaptive_layer_max,
+        );
+        let count = specs.len();
+        (specs, count)
+    } else {
+        let layer_height = req.layer_height.max(0.04);
+        let count = (dim_z / layer_height).ceil().max(1.0) as usize;
+        let specs: Vec<(f64, f64)> = (0..count)
+            .map(|i| (mesh.min_bound.z + (i as f64 + 0.5) * layer_height, layer_height))
+            .collect();
+        (specs, count)
+    };
 
     let config = PrintConfig {
         nozzle_temp: req.nozzle_temp,
         bed_temp: req.bed_temp,
-        layer_height,
+        layer_height: req.layer_height,
         line_width: 0.45,
         filament_diameter: 1.75,
         print_speed_perimeter: req.print_speed * 0.8,
@@ -290,13 +328,17 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         support_enabled: req.support_enabled,
         support_angle: req.support_angle,
         support_density: 0.15,
+        seam_position: req.seam_position,
+        adaptive_layers: req.adaptive_layers,
+        adaptive_layer_min: req.adaptive_layer_min,
+        adaptive_layer_max: req.adaptive_layer_max,
     };
 
     // Step 5a: Slicing layer contours in parallel
     let layer_contours: Vec<Vec<crate::slicer::ClassifiedContour>> = (0..layer_count)
         .into_par_iter()
         .map(|layer_idx| {
-            let z = (layer_idx as f64 + 0.5) * config.layer_height;
+            let (z, _h) = layer_specs[layer_idx];
             let intersecting = bvh.query_z(z);
             let mut segments = Vec::with_capacity(intersecting.len());
             for tri in intersecting {
@@ -375,20 +417,29 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     let processed_layers: Vec<ProcessedLayer> = (0..layer_count)
         .into_par_iter()
         .map(|layer_idx| {
-            let z = (layer_idx as f64 + 0.5) * config.layer_height;
+            let (z, layer_h) = layer_specs[layer_idx];
             let contours = &layer_contours[layer_idx];
             let (supports, support_infill) = support_data[layer_idx].clone();
 
             let mut perimeters = Vec::new();
             let mut infill_boundaries = Vec::new();
 
-            for contour in contours {
-                let perim_loops = PerimeterGenerator::generate_perimeters(
+            for (c_idx, contour) in contours.iter().enumerate() {
+                let mut perim_loops = PerimeterGenerator::generate_perimeters(
                     &contour.polygon,
                     &contour.role,
                     req.perimeters,
                     config.line_width,
                 );
+                for p in &mut perim_loops {
+                    *p = PerimeterGenerator::align_seam(
+                        p,
+                        config.seam_position,
+                        crate::geom::Point2::new(110.0, 110.0),
+                        layer_idx,
+                        c_idx,
+                    );
+                }
                 if let Some(innermost) = perim_loops.last() {
                     infill_boundaries.push(innermost.clone());
                 } else {
@@ -446,6 +497,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             ProcessedLayer {
                 layer_index: layer_idx,
                 z,
+                layer_height: layer_h,
                 skirt_brim,
                 supports,
                 support_infill,
@@ -485,15 +537,25 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
 
             let perimeters: Vec<WebPerimeterPath> = l
                 .perimeters
-                .into_iter()
+                .iter()
                 .flat_map(|poly_group| {
                     poly_group
-                        .into_iter()
+                        .iter()
                         .enumerate()
                         .map(|(idx, p)| WebPerimeterPath {
-                            points: p.points.into_iter().map(|pt| [pt.x, pt.y]).collect(),
+                            points: p.points.iter().map(|pt| [pt.x, pt.y]).collect(),
                             is_outer: idx == 0,
                         })
+                })
+                .collect();
+
+            let seam_points: Vec<[f64; 3]> = l
+                .perimeters
+                .iter()
+                .filter_map(|poly_group| {
+                    poly_group.first().and_then(|outer| {
+                        outer.points.first().map(|pt| [pt.x, pt.y, l.z])
+                    })
                 })
                 .collect();
 
@@ -511,6 +573,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 support_infill,
                 perimeters,
                 infill,
+                seam_points,
             }
         })
         .collect();

@@ -2,12 +2,112 @@ use clipper2_rust::core::{PointD, PathD};
 use clipper2_rust::offset::{JoinType, EndType};
 use clipper2_rust::clipper::inflate_paths_d;
 
+use serde::{Deserialize, Serialize};
+
 use crate::geom::{Point2, Polygon2};
 use crate::slicer::ContourRole;
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeamPosition {
+    Nearest,
+    Aligned,
+    Rear,
+    Random,
+}
+
+impl Default for SeamPosition {
+    fn default() -> Self {
+        Self::Aligned
+    }
+}
 
 pub struct PerimeterGenerator;
 
 impl PerimeterGenerator {
+    /// Reorder a closed polygon's vertices so that vertex 0 is at the desired seam position.
+    pub fn align_seam(
+        poly: &Polygon2,
+        seam: SeamPosition,
+        current_pos: Point2,
+        layer_idx: usize,
+        contour_idx: usize,
+    ) -> Polygon2 {
+        let pts = &poly.points;
+        let n = pts.len();
+        if n < 3 {
+            return poly.clone();
+        }
+
+        let best_idx = match seam {
+            SeamPosition::Nearest => {
+                let mut min_d = f64::MAX;
+                let mut best = 0;
+                for (i, &p) in pts.iter().enumerate() {
+                    let d = current_pos.distance_to(p);
+                    if d < min_d {
+                        min_d = d;
+                        best = i;
+                    }
+                }
+                best
+            }
+            SeamPosition::Rear => {
+                // Find vertex with maximum Y (towards rear of print bed)
+                let mut max_y = f64::MIN;
+                let mut best = 0;
+                for (i, &p) in pts.iter().enumerate() {
+                    if p.y > max_y {
+                        max_y = p.y;
+                        best = i;
+                    }
+                }
+                best
+            }
+            SeamPosition::Aligned => {
+                // Find the sharpest convex exterior corner (minimum dot product / sharp turn)
+                let mut sharpest_dot = 1.0;
+                let mut best = 0;
+                for i in 0..n {
+                    let prev = pts[(i + n - 1) % n];
+                    let curr = pts[i];
+                    let next = pts[(i + 1) % n];
+                    let v1 = (curr - prev).normalized();
+                    let v2 = (next - curr).normalized();
+                    let cross = v1.cross(v2);
+                    let dot = v1.dot(v2);
+
+                    // For outer CCW contour, convex corner has cross > 0
+                    if cross > 0.05 && dot < sharpest_dot {
+                        sharpest_dot = dot;
+                        best = i;
+                    }
+                }
+                // Fallback to Rear if shape is smooth circle with no corners
+                if sharpest_dot > 0.95 {
+                    let mut max_y = f64::MIN;
+                    for (i, &p) in pts.iter().enumerate() {
+                        if p.y > max_y {
+                            max_y = p.y;
+                            best = i;
+                        }
+                    }
+                }
+                best
+            }
+            SeamPosition::Random => {
+                // Pseudo-random index hashed by layer and contour index
+                let hash = (layer_idx.wrapping_mul(7919) ^ contour_idx.wrapping_mul(104729)) % n;
+                hash
+            }
+        };
+
+        let mut reordered = Vec::with_capacity(n);
+        for i in 0..n {
+            reordered.push(pts[(best_idx + i) % n]);
+        }
+        Polygon2::new(reordered)
+    }
     /// Simplify a polygon by collapsing points closer than `min_dist` and removing collinear vertices.
     pub fn simplify_polygon(poly: &Polygon2, min_dist: f64) -> Polygon2 {
         let pts = &poly.points;

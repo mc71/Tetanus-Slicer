@@ -149,9 +149,9 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <aside id="sidebar">
     <div class="dropzone" id="dropzone">
       <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
-      <p>Drop STL or 3MF model here</p>
-      <span>or click to browse file</span>
-      <input type="file" id="file-input" accept=".stl,.3mf" style="display:none">
+      <p>Drop STL or 3MF model(s) here</p>
+      <span>or click to browse (supports multi-model plater)</span>
+      <input type="file" id="file-input" accept=".stl,.3mf" multiple style="display:none">
     </div>
 
     <div id="model-info">
@@ -164,6 +164,22 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="field">
       <div class="field-header"><label>Layer Height</label><span id="val-layer-height">0.20 mm</span></div>
       <input type="range" id="inp-layer-height" min="0.08" max="0.32" step="0.04" value="0.20">
+    </div>
+    <div class="field">
+      <div class="field-header"><label>Variable Layer Heights</label></div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:24px;">
+        <input type="checkbox" id="inp-adaptive-layers" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
+        <span>Adaptive (0.08 - 0.28 mm by slope)</span>
+      </label>
+    </div>
+    <div class="field">
+      <div class="field-header"><label>Seam Placement</label></div>
+      <select id="inp-seam" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+        <option value="aligned" selected>Aligned (Convex Corners)</option>
+        <option value="rear">Rear (+Y Back of Bed)</option>
+        <option value="nearest">Nearest (Fastest Travel)</option>
+        <option value="random">Random (Scattered)</option>
+      </select>
     </div>
     <div class="field">
       <div class="field-header"><label>Wall Count (Perimeters)</label><span id="val-perimeters">2</span></div>
@@ -265,9 +281,11 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Outer Wall</div>
         <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Inner Wall</div>
         <div class="legend-item"><div class="legend-dot" style="background:#06b6d4"></div> Infill</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ffffff; box-shadow:0 0 6px #fff;"></div> Seam</div>
       </div>
       <div class="toggles">
         <label><input type="checkbox" id="chk-show-mesh" checked> Show Mesh</label>
+        <label><input type="checkbox" id="chk-show-seams" checked> Seams</label>
         <label><input type="checkbox" id="chk-accumulate" checked> Build Up</label>
       </div>
     </div>
@@ -276,6 +294,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <script>
     // --- State ---
     let currentStlBase64 = null;
+    let additionalModelsBase64 = [];
     let currentFileName = "cube.stl";
     let loadedMesh = null;
     let toolpathGroup = new THREE.Group();
@@ -390,10 +409,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     dropzone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropzone.classList.remove('dragover');
-      if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+      if (e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files);
     });
     fileInput.addEventListener('change', () => {
-      if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
+      if (fileInput.files.length > 0) handleFiles(fileInput.files);
     });
 
     function isZipBuffer(buffer) {
@@ -402,23 +421,35 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       return b[0] === 0x50 && b[1] === 0x4B && b[2] === 0x03 && b[3] === 0x04;
     }
 
-    async function handleFile(file) {
-      currentFileName = file.name;
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const buffer = e.target.result;
-        currentStlBase64 = arrayBufferToBase64(buffer);
-        if (file.name.toLowerCase().endsWith('.3mf') || isZipBuffer(buffer)) {
-          try {
-            await load3mfToScene(buffer);
-          } catch (err) {
-            alert('Failed to load 3MF: ' + err.message);
-          }
-        } else {
-          loadStlToScene(buffer);
+    async function handleFiles(files) {
+      if (!files || files.length === 0) return;
+      additionalModelsBase64 = [];
+      const file0 = files[0];
+      currentFileName = files.length > 1 ? `${files.length} models arranged` : file0.name;
+
+      const readBuffer = (f) => new Promise((resolve) => {
+        const r = new FileReader();
+        r.onload = (e) => resolve(e.target.result);
+        r.readAsArrayBuffer(f);
+      });
+
+      const buf0 = await readBuffer(file0);
+      currentStlBase64 = arrayBufferToBase64(buf0);
+
+      for (let i = 1; i < files.length; i++) {
+        const bufi = await readBuffer(files[i]);
+        additionalModelsBase64.push(arrayBufferToBase64(bufi));
+      }
+
+      if (file0.name.toLowerCase().endsWith('.3mf') || isZipBuffer(buf0)) {
+        try {
+          await load3mfToScene(buf0);
+        } catch (err) {
+          alert('Failed to load 3MF: ' + err.message);
         }
-      };
-      reader.readAsArrayBuffer(file);
+      } else {
+        loadStlToScene(buf0);
+      }
     }
 
     function arrayBufferToBase64(buffer) {
@@ -575,7 +606,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       const payload = {
         stl_base64: currentStlBase64,
+        additional_models_base64: additionalModelsBase64,
         layer_height: parseFloat(document.getElementById('inp-layer-height').value),
+        adaptive_layers: document.getElementById('inp-adaptive-layers').checked,
+        seam_position: document.getElementById('inp-seam').value,
         perimeters: parseInt(document.getElementById('inp-perimeters').value),
         infill_pattern: document.getElementById('inp-infill-pattern').value,
         infill_density: parseFloat(document.getElementById('inp-infill').value) / 100.0,
@@ -648,11 +682,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (!slicedData || !slicedData.layers) return;
 
       const accumulate = document.getElementById('chk-accumulate').checked;
+      const showSeams = document.getElementById('chk-show-seams') ? document.getElementById('chk-show-seams').checked : true;
       const startIdx = accumulate ? 0 : maxLayerIndex - 1;
       const endIdx = maxLayerIndex;
 
       const positions = [];
       const colors = [];
+      const seamPositions = [];
 
       const colSkirt = new THREE.Color(0xa855f7); // Violet/Purple for skirt & brim
       const colSupport = new THREE.Color(0x14b8a6); // Vibrant Teal/Seafoam for supports
@@ -713,6 +749,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
           }
         }
 
+        // Seams
+        if (showSeams && layer.seam_points) {
+          for (let sp of layer.seam_points) {
+            seamPositions.push(sp[0], sp[1], sp[2]);
+          }
+        }
+
         // Infill
         if (layer.infill) {
           for (let seg of layer.infill) {
@@ -729,6 +772,19 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         const mat = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
         const lines = new THREE.LineSegments(geom, mat);
         toolpathGroup.add(lines);
+      }
+
+      // Render glowing seam markers
+      if (seamPositions.length > 0) {
+        const seamGeom = new THREE.BufferGeometry();
+        seamGeom.setAttribute('position', new THREE.Float32BufferAttribute(seamPositions, 3));
+        const seamMat = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: 5,
+          sizeAttenuation: false
+        });
+        const seamPoints = new THREE.Points(seamGeom, seamMat);
+        toolpathGroup.add(seamPoints);
       }
 
       // Update badge
@@ -748,6 +804,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     document.getElementById('chk-accumulate').addEventListener('change', () => {
       renderToolpaths(parseInt(layerSlider.value));
     });
+
+    const chkShowSeams = document.getElementById('chk-show-seams');
+    if (chkShowSeams) {
+      chkShowSeams.addEventListener('change', () => {
+        renderToolpaths(parseInt(layerSlider.value));
+      });
+    }
 
     document.getElementById('chk-show-mesh').addEventListener('change', (e) => {
       if (loadedMesh) loadedMesh.visible = e.target.checked;

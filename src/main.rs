@@ -1,3 +1,4 @@
+mod adaptive;
 mod arc;
 mod bvh;
 mod geom;
@@ -19,11 +20,12 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
+use adaptive::AdaptiveLayers;
 use bvh::TriangleIntervalIndex;
 use gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
 use geom::Polygon2;
 use infill::{InfillGenerator, InfillPattern};
-use perimeter::PerimeterGenerator;
+use perimeter::{PerimeterGenerator, SeamPosition};
 use slicer::{ContourRole, Slicer};
 use stl::Mesh;
 use support::{SupportConfig, SupportGenerator};
@@ -44,26 +46,13 @@ fn main() {
         return;
     }
 
-    let input_path = if args.len() > 1 && !args[1].starts_with("--") {
-        args[1].clone()
-    } else {
-        println!("No STL input provided. Creating 'cube.stl' (20x20x20mm test cube)...");
-        generate_test_cube_stl("cube.stl").expect("Failed to create test cube");
-        "cube.stl".to_string()
-    };
-
-    let output_path = if args.len() > 2 && !args[2].starts_with("--") {
-        args[2].clone()
-    } else {
-        let p = Path::new(&input_path);
-        p.with_extension("gcode").to_str().unwrap().to_string()
-    };
-
+    let mut input_paths: Vec<String> = Vec::new();
+    let mut custom_output: Option<String> = None;
     let mut config = PrintConfig::default();
     let mut infill_density = 0.20; // 20%
     let mut perimeter_count = 2;
 
-    // Simple arg parser
+    // Arg parser
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -95,29 +84,91 @@ fn main() {
                 config.support_angle = args[i + 1].parse().unwrap_or(45.0);
                 i += 1;
             }
+            "--seam" if i + 1 < args.len() => {
+                config.seam_position = match args[i + 1].to_lowercase().as_str() {
+                    "rear" => SeamPosition::Rear,
+                    "nearest" => SeamPosition::Nearest,
+                    "random" => SeamPosition::Random,
+                    _ => SeamPosition::Aligned,
+                };
+                i += 1;
+            }
+            "--adaptive" | "--adaptive-layers" => {
+                config.adaptive_layers = true;
+            }
+            "--adaptive-min" if i + 1 < args.len() => {
+                config.adaptive_layer_min = args[i + 1].parse().unwrap_or(0.08);
+                i += 1;
+            }
+            "--adaptive-max" if i + 1 < args.len() => {
+                config.adaptive_layer_max = args[i + 1].parse().unwrap_or(0.28);
+                i += 1;
+            }
+            "-o" | "--output" if i + 1 < args.len() => {
+                custom_output = Some(args[i + 1].clone());
+                i += 1;
+            }
+            arg if !arg.starts_with("--") && !arg.starts_with("-") => {
+                if arg.ends_with(".gcode") {
+                    custom_output = Some(arg.to_string());
+                } else {
+                    input_paths.push(arg.to_string());
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
+    if input_paths.is_empty() {
+        println!("No STL input provided. Creating 'cube.stl' (20x20x20mm test cube)...");
+        generate_test_cube_stl("cube.stl").expect("Failed to create test cube");
+        input_paths.push("cube.stl".to_string());
+    }
+
+    let output_path = custom_output.unwrap_or_else(|| {
+        let p = Path::new(&input_paths[0]);
+        p.with_extension("gcode").to_str().unwrap().to_string()
+    });
+
     println!("============================================================");
     println!("           Tetanus-Slicer (High-Speed Slicing Engine)       ");
     println!("============================================================");
-    println!("Input File:      {}", input_path);
+    println!("Input Files:     {} model(s): {:?}", input_paths.len(), input_paths);
     println!("Output G-code:   {}", output_path);
-    println!("Layer Height:    {:.3} mm", config.layer_height);
+    println!("Layer Height:    {:.3} mm {}", config.layer_height, if config.adaptive_layers { format!("(Adaptive [{:.2}-{:.2} mm])", config.adaptive_layer_min, config.adaptive_layer_max) } else { "".to_string() });
+    println!("Seam Placement:  {:?}", config.seam_position);
     println!("Perimeters:      {}", perimeter_count);
     println!("Infill Density:  {:.1}% ({:?})", infill_density * 100.0, config.infill_pattern);
     println!("Supports:        {}", if config.support_enabled { format!("Enabled ({}° overhang)", config.support_angle) } else { "Disabled".to_string() });
     println!("Thread Pool:     {} threads (Rayon)", rayon::current_num_threads());
     println!("------------------------------------------------------------");
 
-    // 1. Load Model (STL or 3MF)
+    // 1. Load Model(s) (STL or 3MF)
     let t_start = Instant::now();
-    let mesh = Mesh::load_stl(&input_path).unwrap_or_else(|e| {
-        eprintln!("Error loading model: {}", e);
-        std::process::exit(1);
-    });
+    let mut meshes = Vec::new();
+    for p in &input_paths {
+        match Mesh::load_stl(p) {
+            Ok(m) => meshes.push(m),
+            Err(e) => {
+                eprintln!("Error loading model '{}': {}", p, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let mesh = if meshes.len() > 1 {
+        println!("[1/4] Arranging {} models with auto-plater...", meshes.len());
+        Mesh::auto_arrange(&mut meshes, 10.0);
+        let mut combined = Mesh::combine(&meshes);
+        combined.center_on_bed(110.0, 110.0);
+        combined
+    } else {
+        let mut m = meshes.remove(0);
+        m.center_on_bed(110.0, 110.0);
+        m
+    };
+
     let t_mesh = t_start.elapsed();
     println!(
         "[1/4] Loaded mesh in {:?}: {} triangles | Bounds: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
@@ -135,8 +186,28 @@ fn main() {
 
     // 3. Compute Layer Heights & Slice Contours in Parallel with Rayon
     let t_slice_start = Instant::now();
-    let total_height = mesh.max_bound.z - mesh.min_bound.z;
-    let layer_count = (total_height / config.layer_height).ceil().max(1.0) as usize;
+    let min_z = mesh.min_bound.z;
+    let max_z = mesh.max_bound.z;
+    let dim_z = max_z - min_z;
+
+    let (layer_specs, layer_count) = if config.adaptive_layers {
+        let specs = AdaptiveLayers::compute_layer_heights(
+            &bvh,
+            min_z,
+            max_z,
+            config.layer_height,
+            config.adaptive_layer_min,
+            config.adaptive_layer_max,
+        );
+        let count = specs.len();
+        (specs, count)
+    } else {
+        let count = (dim_z / config.layer_height).ceil().max(1.0) as usize;
+        let specs: Vec<(f64, f64)> = (0..count)
+            .map(|i| (min_z + (i as f64 + 0.5) * config.layer_height, config.layer_height))
+            .collect();
+        (specs, count)
+    };
 
     println!(
         "[3/4] Slicing {} layers in parallel across {} cores...",
@@ -144,13 +215,11 @@ fn main() {
         rayon::current_num_threads()
     );
 
-    let min_z = mesh.min_bound.z;
-
     // Step 3a: Parallel contour slicing
     let layer_contours: Vec<Vec<slicer::ClassifiedContour>> = (0..layer_count)
         .into_par_iter()
         .map(|layer_idx| {
-            let z = min_z + (layer_idx as f64 + 0.5) * config.layer_height;
+            let (z, _h) = layer_specs[layer_idx];
             let intersecting = bvh.query_z(z);
             let mut segments = Vec::with_capacity(intersecting.len());
             for tri in intersecting {
@@ -229,7 +298,7 @@ fn main() {
     let layers: Vec<ProcessedLayer> = (0..layer_count)
         .into_par_iter()
         .map(|layer_idx| {
-            let z = min_z + (layer_idx as f64 + 0.5) * config.layer_height;
+            let (z, layer_h) = layer_specs[layer_idx];
             let contours = &layer_contours[layer_idx];
             let (supports, support_infill) = support_data[layer_idx].clone();
 
@@ -237,13 +306,22 @@ fn main() {
             let mut perimeters = Vec::new();
             let mut infill_boundaries = Vec::new();
 
-            for contour in contours {
-                let perim_loops = PerimeterGenerator::generate_perimeters(
+            for (c_idx, contour) in contours.iter().enumerate() {
+                let mut perim_loops = PerimeterGenerator::generate_perimeters(
                     &contour.polygon,
                     &contour.role,
                     perimeter_count,
                     config.line_width,
                 );
+                for p in &mut perim_loops {
+                    *p = PerimeterGenerator::align_seam(
+                        p,
+                        config.seam_position,
+                        crate::geom::Point2::new(110.0, 110.0),
+                        layer_idx,
+                        c_idx,
+                    );
+                }
                 if let Some(innermost) = perim_loops.last() {
                     infill_boundaries.push(innermost.clone());
                 } else {
@@ -301,6 +379,7 @@ fn main() {
             ProcessedLayer {
                 layer_index: layer_idx,
                 z,
+                layer_height: layer_h,
                 skirt_brim,
                 supports,
                 support_infill,

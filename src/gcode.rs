@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geom::{Point2, Polygon2, Segment2};
 use crate::infill::InfillPattern;
+use crate::perimeter::SeamPosition;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PrintConfig {
@@ -29,6 +30,10 @@ pub struct PrintConfig {
     pub support_enabled: bool,
     pub support_angle: f64,         // degrees
     pub support_density: f64,
+    pub seam_position: SeamPosition,
+    pub adaptive_layers: bool,
+    pub adaptive_layer_min: f64,
+    pub adaptive_layer_max: f64,
 }
 
 impl Default for PrintConfig {
@@ -57,6 +62,10 @@ impl Default for PrintConfig {
             support_enabled: false,
             support_angle: 45.0,
             support_density: 0.15,
+            seam_position: SeamPosition::Aligned,
+            adaptive_layers: false,
+            adaptive_layer_min: 0.08,
+            adaptive_layer_max: 0.28,
         }
     }
 }
@@ -73,6 +82,7 @@ pub struct PrintEstimates {
 pub struct ProcessedLayer {
     pub layer_index: usize,
     pub z: f64,
+    pub layer_height: f64,
     pub skirt_brim: Vec<Polygon2>,
     pub supports: Vec<Polygon2>,
     pub support_infill: Vec<Segment2>,
@@ -170,7 +180,7 @@ impl<'a> GCodeWriter<'a> {
 
         // Layer move
         writeln!(w, "G1 Z{:.3} F{}", layer.z, self.config.travel_speed * 60.0)?;
-        self.total_time_secs += self.config.layer_height / 10.0; // Z move time
+        self.total_time_secs += layer.layer_height / 10.0; // Z move time
 
         let (perimeter_speed, infill_speed) = if layer.layer_index == 0 {
             (self.config.first_layer_speed, self.config.first_layer_speed)
@@ -184,7 +194,7 @@ impl<'a> GCodeWriter<'a> {
         if !layer.skirt_brim.is_empty() {
             writeln!(w, "; Skirt & Brim")?;
             for poly in &layer.skirt_brim {
-                self.trace_polygon(w, poly, perimeter_speed, layer.z)?;
+                self.trace_polygon(w, poly, perimeter_speed, layer.z, layer.layer_height)?;
             }
         }
 
@@ -192,7 +202,7 @@ impl<'a> GCodeWriter<'a> {
         if !layer.supports.is_empty() {
             writeln!(w, "; Supports")?;
             for poly in &layer.supports {
-                self.trace_polygon(w, poly, perimeter_speed, layer.z)?;
+                self.trace_polygon(w, poly, perimeter_speed, layer.z, layer.layer_height)?;
             }
         }
         if !layer.support_infill.is_empty() {
@@ -200,7 +210,7 @@ impl<'a> GCodeWriter<'a> {
             for seg in &layer.support_infill {
                 self.travel_to(w, seg.p1, layer.z)?;
                 let dist = seg.length();
-                let e = self.calculate_e(dist);
+                let e = self.calculate_e(dist, layer.layer_height);
                 self.total_print_dist_mm += dist;
                 self.total_e += e;
                 self.total_time_secs += move_time(dist, infill_speed, 1200.0);
@@ -214,9 +224,16 @@ impl<'a> GCodeWriter<'a> {
         }
 
         // 3. Perimeters (Walls)
-        for contour_perimeters in &layer.perimeters {
+        for (c_idx, contour_perimeters) in layer.perimeters.iter().enumerate() {
             for poly in contour_perimeters {
-                self.trace_polygon(w, poly, perimeter_speed, layer.z)?;
+                let aligned_poly = crate::perimeter::PerimeterGenerator::align_seam(
+                    poly,
+                    self.config.seam_position,
+                    self.current_pos,
+                    layer.layer_index,
+                    c_idx,
+                );
+                self.trace_polygon(w, &aligned_poly, perimeter_speed, layer.z, layer.layer_height)?;
             }
         }
 
@@ -226,7 +243,7 @@ impl<'a> GCodeWriter<'a> {
             for seg in &layer.infill {
                 self.travel_to(w, seg.p1, layer.z)?;
                 let dist = seg.length();
-                let e = self.calculate_e(dist);
+                let e = self.calculate_e(dist, layer.layer_height);
                 self.total_print_dist_mm += dist;
                 self.total_e += e;
                 self.total_time_secs += move_time(dist, infill_speed, 1200.0);
@@ -248,6 +265,7 @@ impl<'a> GCodeWriter<'a> {
         poly: &Polygon2,
         speed: f64,
         layer_z: f64,
+        layer_height: f64,
     ) -> io::Result<()> {
         let n = poly.points.len();
         if n < 2 {
@@ -263,7 +281,7 @@ impl<'a> GCodeWriter<'a> {
             match cmd {
                 crate::arc::PathSegment::Linear { end } => {
                     let dist = self.current_pos.distance_to(end);
-                    let e = self.calculate_e(dist);
+                    let e = self.calculate_e(dist, layer_height);
                     self.total_print_dist_mm += dist;
                     self.total_e += e;
                     self.total_time_secs += move_time(dist, speed, 1200.0);
@@ -284,7 +302,7 @@ impl<'a> GCodeWriter<'a> {
                     while d_theta >= std::f64::consts::TAU { d_theta -= std::f64::consts::TAU; }
                     let arc_len = radius * d_theta;
 
-                    let e = self.calculate_e(arc_len);
+                    let e = self.calculate_e(arc_len, layer_height);
                     self.total_print_dist_mm += arc_len;
                     self.total_e += e;
                     self.total_time_secs += move_time(arc_len, speed, 1200.0);
@@ -368,8 +386,8 @@ impl<'a> GCodeWriter<'a> {
         Ok(())
     }
 
-    fn calculate_e(&self, dist: f64) -> f64 {
-        let bead_volume = dist * self.config.line_width * self.config.layer_height;
+    fn calculate_e(&self, dist: f64, layer_height: f64) -> f64 {
+        let bead_volume = dist * self.config.line_width * layer_height;
         bead_volume / self.filament_area
     }
 
