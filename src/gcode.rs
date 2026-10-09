@@ -34,6 +34,7 @@ pub struct PrintConfig {
     pub adaptive_layers: bool,
     pub adaptive_layer_min: f64,
     pub adaptive_layer_max: f64,
+    pub spiral_vase: bool,
 }
 
 impl Default for PrintConfig {
@@ -66,6 +67,7 @@ impl Default for PrintConfig {
             adaptive_layers: false,
             adaptive_layer_min: 0.08,
             adaptive_layer_max: 0.28,
+            spiral_vase: false,
         }
     }
 }
@@ -93,6 +95,7 @@ pub struct ProcessedLayer {
 pub struct GCodeWriter<'a> {
     config: &'a PrintConfig,
     current_pos: Point2,
+    current_z: f64,
     is_retracted: bool,
     filament_area: f64,
     total_e: f64,
@@ -108,6 +111,7 @@ impl<'a> GCodeWriter<'a> {
         Self {
             config,
             current_pos: Point2::new(0.0, 0.0),
+            current_z: 0.0,
             is_retracted: false,
             filament_area,
             total_e: 0.0,
@@ -178,9 +182,14 @@ impl<'a> GCodeWriter<'a> {
             writeln!(w, "M106 S{} ; enable cooling fan", self.config.fan_speed)?;
         }
 
-        // Layer move
-        writeln!(w, "G1 Z{:.3} F{}", layer.z, self.config.travel_speed * 60.0)?;
-        self.total_time_secs += layer.layer_height / 10.0; // Z move time
+        let is_spiral_layer = self.config.spiral_vase && layer.layer_index >= self.config.bottom_solid_layers;
+
+        // Discrete layer move (not used during continuous spiral ascent)
+        if !is_spiral_layer {
+            writeln!(w, "G1 Z{:.3} F{}", layer.z, self.config.travel_speed * 60.0)?;
+            self.total_time_secs += layer.layer_height / 10.0; // Z move time
+            self.current_z = layer.z;
+        }
 
         let (perimeter_speed, infill_speed) = if layer.layer_index == 0 {
             (self.config.first_layer_speed, self.config.first_layer_speed)
@@ -196,6 +205,25 @@ impl<'a> GCodeWriter<'a> {
             for poly in &layer.skirt_brim {
                 self.trace_polygon(w, poly, perimeter_speed, layer.z, layer.layer_height)?;
             }
+        }
+
+        if is_spiral_layer {
+            writeln!(w, "; Spiral Vase Mode - Continuous Z Ascent")?;
+            if let Some(primary_contour) = layer.perimeters.iter().max_by_key(|c| {
+                c.first().map(|p| (p.signed_area().abs() * 100.0) as i64).unwrap_or(0)
+            }) {
+                if let Some(outer_poly) = primary_contour.first() {
+                    let aligned_poly = crate::perimeter::PerimeterGenerator::align_seam(
+                        outer_poly,
+                        crate::perimeter::SeamPosition::Nearest,
+                        self.current_pos,
+                        layer.layer_index,
+                        0,
+                    );
+                    self.trace_spiral_polygon(w, &aligned_poly, perimeter_speed, layer.layer_height)?;
+                }
+            }
+            return Ok(());
         }
 
         // 2. Supports
@@ -254,6 +282,67 @@ impl<'a> GCodeWriter<'a> {
                 )?;
                 self.current_pos = seg.p2;
             }
+        }
+
+        Ok(())
+    }
+
+    fn trace_spiral_polygon<W: Write>(
+        &mut self,
+        w: &mut W,
+        poly: &Polygon2,
+        speed: f64,
+        layer_height: f64,
+    ) -> io::Result<()> {
+        let n = poly.points.len();
+        if n < 2 {
+            return Ok(());
+        }
+
+        // Calculate total perimeter length
+        let mut total_perimeter_len = 0.0;
+        for i in 0..n {
+            let p1 = poly.points[i];
+            let p2 = poly.points[(i + 1) % n];
+            total_perimeter_len += p1.distance_to(p2);
+        }
+
+        if total_perimeter_len <= 1e-4 {
+            return Ok(());
+        }
+
+        // If not already at starting point, travel to it at current Z
+        if self.current_pos.distance_to(poly.points[0]) > 0.05 {
+            self.travel_to(w, poly.points[0], self.current_z)?;
+        }
+
+        let feedrate = speed * 60.0;
+
+        for i in 0..n {
+            let p1 = poly.points[i];
+            let p2 = poly.points[(i + 1) % n];
+            let seg_len = p1.distance_to(p2);
+            if seg_len <= 1e-4 {
+                continue;
+            }
+
+            let delta_z = layer_height * (seg_len / total_perimeter_len);
+            let next_z = self.current_z + delta_z;
+            let move_dist = (seg_len * seg_len + delta_z * delta_z).sqrt();
+            let e = self.calculate_e(move_dist, layer_height);
+
+            self.total_print_dist_mm += move_dist;
+            self.total_e += e;
+            self.total_time_secs += move_time(move_dist, speed, 1200.0);
+
+            writeln!(
+                w,
+                "G1 X{:.3} Y{:.3} Z{:.3} E{:.4} F{:.1}",
+                p2.x, p2.y, next_z, e, feedrate
+            )?;
+
+            self.current_pos = p2;
+            self.current_z = next_z;
         }
 
         Ok(())
@@ -441,5 +530,76 @@ fn move_time(dist: f64, speed: f64, accel: f64) -> f64 {
         2.0 * (speed / accel) + (dist - 2.0 * d_accel) / speed
     } else {
         2.0 * (dist / accel).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{Point2, Polygon2};
+
+    #[test]
+    fn test_spiral_vase_continuous_z() {
+        let config = PrintConfig {
+            spiral_vase: true,
+            bottom_solid_layers: 1,
+            layer_height: 0.2,
+            ..PrintConfig::default()
+        };
+
+        let mut writer = GCodeWriter::new(&config);
+        let mut buf = Vec::new();
+
+        // Layer 0: flat bottom shell
+        let square = Polygon2::new(vec![
+            Point2::new(10.0, 10.0),
+            Point2::new(20.0, 10.0),
+            Point2::new(20.0, 20.0),
+            Point2::new(10.0, 20.0),
+        ]);
+        let layer0 = ProcessedLayer {
+            layer_index: 0,
+            z: 0.2,
+            layer_height: 0.2,
+            skirt_brim: Vec::new(),
+            supports: Vec::new(),
+            support_infill: Vec::new(),
+            perimeters: vec![vec![square.clone()]],
+            infill: Vec::new(),
+        };
+        writer.write_layer(&mut buf, &layer0).unwrap();
+
+        // Layer 1: spiral mode layer
+        let layer1 = ProcessedLayer {
+            layer_index: 1,
+            z: 0.4,
+            layer_height: 0.2,
+            skirt_brim: Vec::new(),
+            supports: Vec::new(),
+            support_infill: Vec::new(),
+            perimeters: vec![vec![square.clone()]],
+            infill: Vec::new(),
+        };
+        writer.write_layer(&mut buf, &layer1).unwrap();
+
+        let gcode = String::from_utf8(buf).unwrap();
+        assert!(gcode.contains("; Spiral Vase Mode - Continuous Z Ascent"));
+
+        // Verify that moves in layer 1 have continuous simultaneous Z and X/Y coordinates
+        let spiral_section = gcode.split("; Spiral Vase Mode - Continuous Z Ascent").nth(1).unwrap();
+        let mut found_z_moves = 0;
+        let mut last_z = 0.2;
+        for line in spiral_section.lines() {
+            if line.starts_with("G1 X") && line.contains(" Z") {
+                found_z_moves += 1;
+                // Parse Z coordinate
+                let z_part = line.split(" Z").nth(1).unwrap().split(' ').next().unwrap();
+                let z_val: f64 = z_part.parse().unwrap();
+                assert!(z_val >= last_z, "Z must ascend monotonically in spiral mode: {} < {}", z_val, last_z);
+                last_z = z_val;
+            }
+        }
+        assert!(found_z_moves >= 4, "Expected at least 4 spiral perimeter segments with Z move");
+        assert!((last_z - 0.4).abs() < 1e-3, "Spiral layer should finish at layer Z (0.4), got {}", last_z);
     }
 }

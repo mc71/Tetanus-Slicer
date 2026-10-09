@@ -104,6 +104,9 @@ fn main() {
                 config.adaptive_layer_max = args[i + 1].parse().unwrap_or(0.28);
                 i += 1;
             }
+            "--vase" | "--spiral-vase" => {
+                config.spiral_vase = true;
+            }
             "-o" | "--output" if i + 1 < args.len() => {
                 custom_output = Some(args[i + 1].clone());
                 i += 1;
@@ -137,10 +140,14 @@ fn main() {
     println!("Input Files:     {} model(s): {:?}", input_paths.len(), input_paths);
     println!("Output G-code:   {}", output_path);
     println!("Layer Height:    {:.3} mm {}", config.layer_height, if config.adaptive_layers { format!("(Adaptive [{:.2}-{:.2} mm])", config.adaptive_layer_min, config.adaptive_layer_max) } else { "".to_string() });
-    println!("Seam Placement:  {:?}", config.seam_position);
-    println!("Perimeters:      {}", perimeter_count);
-    println!("Infill Density:  {:.1}% ({:?})", infill_density * 100.0, config.infill_pattern);
-    println!("Supports:        {}", if config.support_enabled { format!("Enabled ({}° overhang)", config.support_angle) } else { "Disabled".to_string() });
+    if config.spiral_vase {
+        println!("Spiral Vase:     ENABLED (Seamless Continuous Single-Wall Ascent)");
+    } else {
+        println!("Seam Placement:  {:?}", config.seam_position);
+    }
+    println!("Perimeters:      {}", if config.spiral_vase { "1 (Vase Mode)".to_string() } else { perimeter_count.to_string() });
+    println!("Infill Density:  {:.1}% ({:?})", if config.spiral_vase { 0.0 } else { infill_density * 100.0 }, config.infill_pattern);
+    println!("Supports:        {}", if config.support_enabled && !config.spiral_vase { format!("Enabled ({}° overhang)", config.support_angle) } else { "Disabled".to_string() });
     println!("Thread Pool:     {} threads (Rayon)", rayon::current_num_threads());
     println!("------------------------------------------------------------");
 
@@ -253,34 +260,36 @@ fn main() {
     for idx in 0..config.bottom_solid_layers.min(layer_count) {
         is_solid_layer[idx] = true;
     }
-    for idx in layer_count.saturating_sub(config.top_solid_layers)..layer_count {
-        is_solid_layer[idx] = true;
-    }
-    // Intermediate roofs (e.g. deck, cabin roof, cargo steps)
-    for i in 0..(layer_count.saturating_sub(1)) {
-        let curr_area = layer_areas[i];
-        let next_area = layer_areas[i + 1];
-        if curr_area > next_area + 15.0 {
-            let start = i.saturating_sub(config.top_solid_layers.saturating_sub(1));
-            for k in start..=i {
-                is_solid_layer[k] = true;
+    if !config.spiral_vase {
+        for idx in layer_count.saturating_sub(config.top_solid_layers)..layer_count {
+            is_solid_layer[idx] = true;
+        }
+        // Intermediate roofs (e.g. deck, cabin roof, cargo steps)
+        for i in 0..(layer_count.saturating_sub(1)) {
+            let curr_area = layer_areas[i];
+            let next_area = layer_areas[i + 1];
+            if curr_area > next_area + 15.0 {
+                let start = i.saturating_sub(config.top_solid_layers.saturating_sub(1));
+                for k in start..=i {
+                    is_solid_layer[k] = true;
+                }
             }
         }
-    }
-    // Intermediate floors
-    for i in 1..layer_count {
-        let curr_area = layer_areas[i];
-        let prev_area = layer_areas[i - 1];
-        if curr_area > prev_area + 15.0 {
-            let end = (i + config.bottom_solid_layers).min(layer_count);
-            for k in i..end {
-                is_solid_layer[k] = true;
+        // Intermediate floors
+        for i in 1..layer_count {
+            let curr_area = layer_areas[i];
+            let prev_area = layer_areas[i - 1];
+            if curr_area > prev_area + 15.0 {
+                let end = (i + config.bottom_solid_layers).min(layer_count);
+                for k in i..end {
+                    is_solid_layer[k] = true;
+                }
             }
         }
     }
 
     // Step 3c: Support generation across layers if enabled
-    let support_data: Vec<(Vec<Polygon2>, Vec<geom::Segment2>)> = if config.support_enabled {
+    let support_data: Vec<(Vec<Polygon2>, Vec<geom::Segment2>)> = if config.support_enabled && !config.spiral_vase {
         let sup_cfg = SupportConfig {
             enabled: true,
             overhang_angle: config.support_angle,
@@ -302,6 +311,9 @@ fn main() {
             let contours = &layer_contours[layer_idx];
             let (supports, support_infill) = support_data[layer_idx].clone();
 
+            let is_spiral = config.spiral_vase && layer_idx >= config.bottom_solid_layers;
+            let current_perimeters = if is_spiral { 1 } else { perimeter_count };
+
             // Generate perimeters & inner boundaries
             let mut perimeters = Vec::new();
             let mut infill_boundaries = Vec::new();
@@ -310,13 +322,13 @@ fn main() {
                 let mut perim_loops = PerimeterGenerator::generate_perimeters(
                     &contour.polygon,
                     &contour.role,
-                    perimeter_count,
+                    current_perimeters,
                     config.line_width,
                 );
                 for p in &mut perim_loops {
                     *p = PerimeterGenerator::align_seam(
                         p,
-                        config.seam_position,
+                        if is_spiral { SeamPosition::Nearest } else { config.seam_position },
                         crate::geom::Point2::new(110.0, 110.0),
                         layer_idx,
                         c_idx,
@@ -359,22 +371,26 @@ fn main() {
                 Vec::new()
             };
 
-            // Top and Bottom Solid Shells (100% rectilinear density)
-            let is_solid = is_solid_layer[layer_idx];
-            let (pattern, layer_infill_density) = if is_solid {
-                (InfillPattern::Rectilinear, 1.0)
+            // Infill (0 for spiral vase mode layers)
+            let infill = if is_spiral {
+                Vec::new()
             } else {
-                (config.infill_pattern, infill_density)
-            };
+                let is_solid = is_solid_layer[layer_idx];
+                let (pattern, layer_infill_density) = if is_solid {
+                    (InfillPattern::Rectilinear, 1.0)
+                } else {
+                    (config.infill_pattern, infill_density)
+                };
 
-            let infill = InfillGenerator::generate_infill(
-                pattern,
-                &infill_boundaries,
-                layer_infill_density,
-                config.line_width,
-                layer_idx,
-                z,
-            );
+                InfillGenerator::generate_infill(
+                    pattern,
+                    &infill_boundaries,
+                    layer_infill_density,
+                    config.line_width,
+                    layer_idx,
+                    z,
+                )
+            };
 
             ProcessedLayer {
                 layer_index: layer_idx,

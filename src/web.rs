@@ -57,6 +57,8 @@ pub struct SliceRequest {
     pub adaptive_layer_min: f64,
     #[serde(default = "default_adaptive_max")]
     pub adaptive_layer_max: f64,
+    #[serde(default)]
+    pub spiral_vase: bool,
 }
 
 fn default_layer_height() -> f64 { 0.20 }
@@ -85,6 +87,7 @@ pub struct SliceResponse {
     pub stats: Option<SliceStats>,
     pub layers: Vec<WebLayer>,
     pub gcode: String,
+    pub spiral_vase: bool,
 }
 
 #[derive(Serialize)]
@@ -160,6 +163,7 @@ pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                         stats: None,
                         layers: Vec::new(),
                         gcode: String::new(),
+                        spiral_vase: false,
                     }).unwrap();
                     let response = Response::from_string(err_resp)
                         .with_status_code(StatusCode(400))
@@ -178,6 +182,7 @@ pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                             stats: None,
                             layers: Vec::new(),
                             gcode: String::new(),
+                            spiral_vase: false,
                         }).unwrap();
                         let response = Response::from_string(err_resp)
                             .with_status_code(StatusCode(400))
@@ -222,6 +227,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                     stats: None,
                     layers: Vec::new(),
                     gcode: String::new(),
+                    spiral_vase: false,
                 };
             }
         }
@@ -239,6 +245,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 stats: None,
                 layers: Vec::new(),
                 gcode: String::new(),
+                spiral_vase: false,
             };
         }
     };
@@ -250,6 +257,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             stats: None,
             layers: Vec::new(),
             gcode: String::new(),
+            spiral_vase: false,
         };
     }
 
@@ -332,6 +340,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         adaptive_layers: req.adaptive_layers,
         adaptive_layer_min: req.adaptive_layer_min,
         adaptive_layer_max: req.adaptive_layer_max,
+        spiral_vase: req.spiral_vase,
     };
 
     // Step 5a: Slicing layer contours in parallel
@@ -372,34 +381,36 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     for idx in 0..config.bottom_solid_layers.min(layer_count) {
         is_solid_layer[idx] = true;
     }
-    for idx in layer_count.saturating_sub(config.top_solid_layers)..layer_count {
-        is_solid_layer[idx] = true;
-    }
-    // Intermediate roofs (e.g. deck, cabin roof, cargo steps)
-    for i in 0..(layer_count.saturating_sub(1)) {
-        let curr_area = layer_areas[i];
-        let next_area = layer_areas[i + 1];
-        if curr_area > next_area + 15.0 {
-            let start = i.saturating_sub(config.top_solid_layers.saturating_sub(1));
-            for k in start..=i {
-                is_solid_layer[k] = true;
+    if !config.spiral_vase {
+        for idx in layer_count.saturating_sub(config.top_solid_layers)..layer_count {
+            is_solid_layer[idx] = true;
+        }
+        // Intermediate roofs (e.g. deck, cabin roof, cargo steps)
+        for i in 0..(layer_count.saturating_sub(1)) {
+            let curr_area = layer_areas[i];
+            let next_area = layer_areas[i + 1];
+            if curr_area > next_area + 15.0 {
+                let start = i.saturating_sub(config.top_solid_layers.saturating_sub(1));
+                for k in start..=i {
+                    is_solid_layer[k] = true;
+                }
             }
         }
-    }
-    // Intermediate floors
-    for i in 1..layer_count {
-        let curr_area = layer_areas[i];
-        let prev_area = layer_areas[i - 1];
-        if curr_area > prev_area + 15.0 {
-            let end = (i + config.bottom_solid_layers).min(layer_count);
-            for k in i..end {
-                is_solid_layer[k] = true;
+        // Intermediate floors
+        for i in 1..layer_count {
+            let curr_area = layer_areas[i];
+            let prev_area = layer_areas[i - 1];
+            if curr_area > prev_area + 15.0 {
+                let end = (i + config.bottom_solid_layers).min(layer_count);
+                for k in i..end {
+                    is_solid_layer[k] = true;
+                }
             }
         }
     }
 
     // Step 5c: Support generation across layers if enabled
-    let support_data: Vec<(Vec<Polygon2>, Vec<crate::geom::Segment2>)> = if config.support_enabled {
+    let support_data: Vec<(Vec<Polygon2>, Vec<crate::geom::Segment2>)> = if config.support_enabled && !config.spiral_vase {
         let sup_cfg = SupportConfig {
             enabled: true,
             overhang_angle: config.support_angle,
@@ -421,6 +432,9 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             let contours = &layer_contours[layer_idx];
             let (supports, support_infill) = support_data[layer_idx].clone();
 
+            let is_spiral = config.spiral_vase && layer_idx >= config.bottom_solid_layers;
+            let perimeter_count = if is_spiral { 1 } else { req.perimeters };
+
             let mut perimeters = Vec::new();
             let mut infill_boundaries = Vec::new();
 
@@ -428,13 +442,13 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 let mut perim_loops = PerimeterGenerator::generate_perimeters(
                     &contour.polygon,
                     &contour.role,
-                    req.perimeters,
+                    perimeter_count,
                     config.line_width,
                 );
                 for p in &mut perim_loops {
                     *p = PerimeterGenerator::align_seam(
                         p,
-                        config.seam_position,
+                        if is_spiral { crate::perimeter::SeamPosition::Nearest } else { config.seam_position },
                         crate::geom::Point2::new(110.0, 110.0),
                         layer_idx,
                         c_idx,
@@ -477,22 +491,26 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 Vec::new()
             };
 
-            // Top and Bottom Solid Shells (100% rectilinear density)
-            let is_solid = is_solid_layer[layer_idx];
-            let (pattern, layer_infill_density) = if is_solid {
-                (InfillPattern::Rectilinear, 1.0)
+            // Infill (0 for spiral vase mode layers)
+            let infill = if is_spiral {
+                Vec::new()
             } else {
-                (config.infill_pattern, req.infill_density)
-            };
+                let is_solid = is_solid_layer[layer_idx];
+                let (pattern, layer_infill_density) = if is_solid {
+                    (InfillPattern::Rectilinear, 1.0)
+                } else {
+                    (config.infill_pattern, req.infill_density)
+                };
 
-            let infill = InfillGenerator::generate_infill(
-                pattern,
-                &infill_boundaries,
-                layer_infill_density,
-                config.line_width,
-                layer_idx,
-                z,
-            );
+                InfillGenerator::generate_infill(
+                    pattern,
+                    &infill_boundaries,
+                    layer_infill_density,
+                    config.line_width,
+                    layer_idx,
+                    z,
+                )
+            };
 
             ProcessedLayer {
                 layer_index: layer_idx,
@@ -549,15 +567,19 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 })
                 .collect();
 
-            let seam_points: Vec<[f64; 3]> = l
-                .perimeters
-                .iter()
-                .filter_map(|poly_group| {
-                    poly_group.first().and_then(|outer| {
-                        outer.points.first().map(|pt| [pt.x, pt.y, l.z])
+            let is_spiral = config.spiral_vase && l.layer_index >= config.bottom_solid_layers;
+            let seam_points: Vec<[f64; 3]> = if is_spiral {
+                Vec::new()
+            } else {
+                l.perimeters
+                    .iter()
+                    .filter_map(|poly_group| {
+                        poly_group.first().and_then(|outer| {
+                            outer.points.first().map(|pt| [pt.x, pt.y, l.z])
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            };
 
             let infill = l
                 .infill
@@ -603,6 +625,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         }),
         layers: web_layers,
         gcode: gcode_str,
+        spiral_vase: req.spiral_vase,
     }
 }
 

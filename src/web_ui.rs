@@ -173,6 +173,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </label>
     </div>
     <div class="field">
+      <div class="field-header"><label>Vase Mode</label></div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:24px;">
+        <input type="checkbox" id="inp-spiral-vase" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
+        <span>Spiralize Outer Contour</span>
+      </label>
+    </div>
+    <div class="field">
       <div class="field-header"><label>Seam Placement</label></div>
       <select id="inp-seam" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
         <option value="aligned" selected>Aligned (Convex Corners)</option>
@@ -609,6 +616,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         additional_models_base64: additionalModelsBase64,
         layer_height: parseFloat(document.getElementById('inp-layer-height').value),
         adaptive_layers: document.getElementById('inp-adaptive-layers').checked,
+        spiral_vase: document.getElementById('inp-spiral-vase') ? document.getElementById('inp-spiral-vase').checked : false,
         seam_position: document.getElementById('inp-seam').value,
         perimeters: parseInt(document.getElementById('inp-perimeters').value),
         infill_pattern: document.getElementById('inp-infill-pattern').value,
@@ -735,6 +743,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
         // Perimeters
         if (layer.perimeters) {
+          const isSpiral = slicedData.spiral_vase && i >= (document.getElementById('inp-bottom-solid') ? parseInt(document.getElementById('inp-bottom-solid').value) : 4);
+          const prevZ = (i > 0 && slicedData.layers[i - 1]) ? slicedData.layers[i - 1].z : (z - 0.2);
+          const deltaZ = z - prevZ;
+
           for (let perim of layer.perimeters) {
             const color = perim.is_outer ? colOuter : colInner;
             const poly = perim.points;
@@ -743,7 +755,13 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
             for (let j = 0; j < n; j++) {
               const p1 = poly[j];
               const p2 = poly[(j + 1) % n];
-              positions.push(p1[0], p1[1], z, p2[0], p2[1], z);
+              if (isSpiral) {
+                const z1 = prevZ + (j / n) * deltaZ;
+                const z2 = prevZ + ((j + 1) / n) * deltaZ;
+                positions.push(p1[0], p1[1], z1, p2[0], p2[1], z2);
+              } else {
+                positions.push(p1[0], p1[1], z, p2[0], p2[1], z);
+              }
               colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
             }
           }
