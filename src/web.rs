@@ -7,10 +7,11 @@ use tiny_http::{Header, Response, Server, StatusCode};
 use crate::bvh::TriangleIntervalIndex;
 use crate::gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
 use crate::geom::{Point3, Polygon2};
-use crate::infill::InfillGenerator;
+use crate::infill::{InfillGenerator, InfillPattern};
 use crate::perimeter::PerimeterGenerator;
 use crate::slicer::{ContourRole, Slicer};
 use crate::stl::Mesh;
+use crate::support::{SupportConfig, SupportGenerator};
 use crate::web_ui::INDEX_HTML;
 
 #[derive(Deserialize)]
@@ -40,6 +41,12 @@ pub struct SliceRequest {
     pub z_hop: f64,
     #[serde(default = "default_fan_speed")]
     pub fan_speed: u8,
+    #[serde(default = "default_infill_pattern")]
+    pub infill_pattern: InfillPattern,
+    #[serde(default = "default_support_enabled")]
+    pub support_enabled: bool,
+    #[serde(default = "default_support_angle")]
+    pub support_angle: f64,
 }
 
 fn default_layer_height() -> f64 { 0.20 }
@@ -54,6 +61,9 @@ fn default_skirt_loops() -> usize { 2 }
 fn default_brim_width() -> f64 { 0.0 }
 fn default_z_hop() -> f64 { 0.2 }
 fn default_fan_speed() -> u8 { 255 }
+fn default_infill_pattern() -> InfillPattern { InfillPattern::Rectilinear }
+fn default_support_enabled() -> bool { false }
+fn default_support_angle() -> f64 { 45.0 }
 
 #[derive(Serialize)]
 pub struct SliceResponse {
@@ -69,6 +79,8 @@ pub struct WebLayer {
     pub index: usize,
     pub z: f64,
     pub skirt_brim: Vec<Vec<[f64; 2]>>,
+    pub supports: Vec<Vec<[f64; 2]>>,
+    pub support_infill: Vec<[[f64; 2]; 2]>,
     pub perimeters: Vec<Vec<[f64; 2]>>,
     pub infill: Vec<[[f64; 2]; 2]>,
 }
@@ -79,6 +91,9 @@ pub struct SliceStats {
     pub layer_count: usize,
     pub elapsed_ms: f64,
     pub dimensions: [f64; 3],
+    pub print_time_formatted: String,
+    pub filament_meters: f64,
+    pub filament_grams: f64,
 }
 
 pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
@@ -176,8 +191,8 @@ pub fn start_web_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     let t_start = Instant::now();
 
-    // 1. Decode STL bytes
-    let raw_stl_bytes = if let Some(ref b64) = req.stl_base64 {
+    // 1. Decode bytes (STL or 3MF)
+    let raw_bytes = if let Some(ref b64) = req.stl_base64 {
         match BASE64_STANDARD.decode(b64.trim()) {
             Ok(b) => b,
             Err(e) => {
@@ -194,13 +209,13 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         create_cube_stl_bytes()
     };
 
-    // 2. Parse Mesh
-    let mut mesh = match Mesh::from_slice(&raw_stl_bytes) {
+    // 2. Parse Mesh (supports both STL and 3MF)
+    let mut mesh = match Mesh::from_slice(&raw_bytes) {
         Ok(m) => m,
         Err(e) => {
             return SliceResponse {
                 success: false,
-                error: Some(format!("Failed to parse STL: {}", e)),
+                error: Some(format!("Failed to parse model: {}", e)),
                 stats: None,
                 layers: Vec::new(),
                 gcode: String::new(),
@@ -211,7 +226,7 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
     if mesh.triangles.is_empty() {
         return SliceResponse {
             success: false,
-            error: Some("STL mesh contains 0 triangles".to_string()),
+            error: Some("Mesh contains 0 triangles".to_string()),
             stats: None,
             layers: Vec::new(),
             gcode: String::new(),
@@ -265,13 +280,17 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         brim_width: req.brim_width,
         fan_speed: req.fan_speed,
         fan_below_layer: 1,
+        infill_pattern: req.infill_pattern,
+        support_enabled: req.support_enabled,
+        support_angle: req.support_angle,
+        support_density: 0.15,
     };
 
-    let processed_layers: Vec<ProcessedLayer> = (0..layer_count)
+    // Step 5a: Slicing layer contours in parallel
+    let layer_contours: Vec<Vec<crate::slicer::ClassifiedContour>> = (0..layer_count)
         .into_par_iter()
         .map(|layer_idx| {
             let z = (layer_idx as f64 + 0.5) * config.layer_height;
-
             let intersecting = bvh.query_z(z);
             let mut segments = Vec::with_capacity(intersecting.len());
             for tri in intersecting {
@@ -279,13 +298,48 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                     segments.push(seg);
                 }
             }
+            Slicer::chain_segments(&segments)
+        })
+        .collect();
 
-            let contours = Slicer::chain_segments(&segments);
+    // Step 5b: Support generation across layers if enabled
+    let support_data: Vec<(Vec<Polygon2>, Vec<crate::geom::Segment2>)> = if config.support_enabled {
+        let layers_outer_polys: Vec<Vec<Polygon2>> = layer_contours
+            .iter()
+            .map(|contours| {
+                contours
+                    .iter()
+                    .filter(|c| c.role == ContourRole::Outer)
+                    .map(|c| c.polygon.clone())
+                    .collect()
+            })
+            .collect();
+
+        let sup_cfg = SupportConfig {
+            enabled: true,
+            overhang_angle: config.support_angle,
+            support_density: config.support_density,
+            line_width: config.line_width,
+            layer_height: config.layer_height,
+            xy_gap: 0.6,
+        };
+        SupportGenerator::generate_supports(&layers_outer_polys, &sup_cfg)
+    } else {
+        vec![(Vec::new(), Vec::new()); layer_count]
+    };
+
+    // Step 5c: Parallel toolpath generation
+    let processed_layers: Vec<ProcessedLayer> = (0..layer_count)
+        .into_par_iter()
+        .map(|layer_idx| {
+            let z = (layer_idx as f64 + 0.5) * config.layer_height;
+            let contours = &layer_contours[layer_idx];
+            let (supports, support_infill) = support_data[layer_idx].clone();
 
             let mut perimeters = Vec::new();
             let mut infill_boundaries = Vec::new();
 
-            for contour in &contours {
+            for contour in contours {
                 let perim_loops = PerimeterGenerator::generate_perimeters(
                     &contour.polygon,
                     &contour.role,
@@ -332,29 +386,37 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             // Top and Bottom Solid Shells (100% rectilinear density)
             let is_solid = layer_idx < config.bottom_solid_layers
                 || layer_idx >= layer_count.saturating_sub(config.top_solid_layers);
-            let layer_infill_density = if is_solid { 1.0 } else { req.infill_density };
+            let (pattern, layer_infill_density) = if is_solid {
+                (InfillPattern::Rectilinear, 1.0)
+            } else {
+                (config.infill_pattern, req.infill_density)
+            };
 
-            let infill = InfillGenerator::generate_rectilinear(
+            let infill = InfillGenerator::generate_infill(
+                pattern,
                 &infill_boundaries,
                 layer_infill_density,
                 config.line_width,
                 layer_idx,
+                z,
             );
 
             ProcessedLayer {
                 layer_index: layer_idx,
                 z,
                 skirt_brim,
+                supports,
+                support_infill,
                 perimeters,
                 infill,
             }
         })
         .collect();
 
-    // 6. Generate G-code
+    // 6. Generate G-code & Compute Print Estimates
     let mut gcode_buf = Vec::new();
     let mut gcode_writer = GCodeWriter::new(&config);
-    let _ = gcode_writer.write_gcode(&mut gcode_buf, &processed_layers);
+    let estimates = gcode_writer.write_gcode(&mut gcode_buf, &processed_layers).unwrap();
     let gcode_str = String::from_utf8_lossy(&gcode_buf).to_string();
 
     // 7. Convert Layers to Web Format for Three.js
@@ -365,6 +427,18 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 .skirt_brim
                 .into_iter()
                 .map(|p| p.points.into_iter().map(|pt| [pt.x, pt.y]).collect::<Vec<[f64; 2]>>())
+                .collect();
+
+            let supports = l
+                .supports
+                .into_iter()
+                .map(|p| p.points.into_iter().map(|pt| [pt.x, pt.y]).collect::<Vec<[f64; 2]>>())
+                .collect();
+
+            let support_infill = l
+                .support_infill
+                .into_iter()
+                .map(|seg| [[seg.p1.x, seg.p1.y], [seg.p2.x, seg.p2.y]])
                 .collect();
 
             let perimeters = l
@@ -387,6 +461,8 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 index: l.layer_index,
                 z: l.z,
                 skirt_brim,
+                supports,
+                support_infill,
                 perimeters,
                 infill,
             }
@@ -394,6 +470,15 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
         .collect();
 
     let elapsed = t_start.elapsed();
+    let total_secs = estimates.print_time_seconds;
+    let hours = (total_secs / 3600.0).floor() as u64;
+    let mins = ((total_secs % 3600.0) / 60.0).floor() as u64;
+    let secs = (total_secs % 60.0).floor() as u64;
+    let time_formatted = if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m {}s", mins, secs)
+    };
 
     SliceResponse {
         success: true,
@@ -403,6 +488,9 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
             layer_count: web_layers.len(),
             elapsed_ms: elapsed.as_secs_f64() * 1000.0,
             dimensions: [dim_x, dim_y, dim_z],
+            print_time_formatted: time_formatted,
+            filament_meters: estimates.filament_used_mm / 1000.0,
+            filament_grams: estimates.filament_used_grams,
         }),
         layers: web_layers,
         gcode: gcode_str,

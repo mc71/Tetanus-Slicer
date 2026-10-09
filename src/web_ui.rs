@@ -136,6 +136,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     </div>
     <div id="stats-pill" class="stats-pill">
       <span>⚡ Sliced in <b id="stat-time">0 ms</b> (<b id="stat-layers">0</b> layers)</span>
+      <span style="opacity:0.35">|</span>
+      <span>⏱️ Est. <b id="stat-print-time">0m</b></span>
+      <span style="opacity:0.35">|</span>
+      <span>🧵 <b id="stat-filament">0g</b></span>
     </div>
   </header>
 
@@ -166,6 +170,15 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <input type="range" id="inp-perimeters" min="1" max="5" step="1" value="2">
     </div>
     <div class="field">
+      <div class="field-header"><label>Infill Pattern</label></div>
+      <select id="inp-infill-pattern" style="background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:7px 10px; border-radius:8px; outline:none; font-size:12px; font-weight:600; cursor:pointer;">
+        <option value="rectilinear" selected>Rectilinear (Standard 45°/135°)</option>
+        <option value="grid">Grid (Square Crosshatch)</option>
+        <option value="triangles">Triangles (Isotropic Rigidity)</option>
+        <option value="gyroid">Gyroid (Continuous 3D Sinusoidal)</option>
+      </select>
+    </div>
+    <div class="field">
       <div class="field-header"><label>Infill Density</label><span id="val-infill">20%</span></div>
       <input type="range" id="inp-infill" min="0" max="100" step="5" value="20">
     </div>
@@ -177,6 +190,21 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <div class="field">
         <div class="field-header"><label>Bottom Shells</label><span id="val-bottom-solid">4</span></div>
         <input type="range" id="inp-bottom-solid" min="0" max="10" step="1" value="4">
+      </div>
+    </div>
+
+    <div class="section-title">Support Structures</div>
+    <div class="grid-2">
+      <div class="field">
+        <div class="field-header"><label>Supports</label></div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; height:28px;">
+          <input type="checkbox" id="inp-support-enabled" style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
+          <span>Generate</span>
+        </label>
+      </div>
+      <div class="field">
+        <div class="field-header"><label>Overhang Angle</label><span id="val-support-angle">45°</span></div>
+        <input type="range" id="inp-support-angle" min="30" max="75" step="5" value="45">
       </div>
     </div>
 
@@ -233,6 +261,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     <div class="scrubber-header">
       <div class="legend">
         <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div> Skirt/Brim</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#14b8a6"></div> Support</div>
         <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Outer Wall</div>
         <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Inner Wall</div>
         <div class="legend-item"><div class="legend-dot" style="background:#06b6d4"></div> Infill</div>
@@ -343,6 +372,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     linkSlider('inp-z-hop', 'val-z-hop', ' mm', 1, 2);
     linkSlider('inp-speed', 'val-speed', ' mm/s', 1);
     linkSlider('inp-nozzle', 'val-nozzle', '°C', 1);
+    linkSlider('inp-support-angle', 'val-support-angle', '°', 1);
 
     const inpFan = document.getElementById('inp-fan');
     if (inpFan) {
@@ -547,12 +577,15 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
         stl_base64: currentStlBase64,
         layer_height: parseFloat(document.getElementById('inp-layer-height').value),
         perimeters: parseInt(document.getElementById('inp-perimeters').value),
+        infill_pattern: document.getElementById('inp-infill-pattern').value,
         infill_density: parseFloat(document.getElementById('inp-infill').value) / 100.0,
         print_speed: parseFloat(document.getElementById('inp-speed').value),
         nozzle_temp: parseInt(document.getElementById('inp-nozzle').value),
         bed_temp: 60,
         top_solid_layers: parseInt(document.getElementById('inp-top-solid').value),
         bottom_solid_layers: parseInt(document.getElementById('inp-bottom-solid').value),
+        support_enabled: document.getElementById('inp-support-enabled').checked,
+        support_angle: parseFloat(document.getElementById('inp-support-angle').value),
         skirt_loops: parseInt(document.getElementById('inp-skirt').value),
         brim_width: parseFloat(document.getElementById('inp-brim').value),
         z_hop: parseFloat(document.getElementById('inp-z-hop').value),
@@ -583,6 +616,8 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       // Update stats pill
       document.getElementById('stat-time').innerText = `${data.stats.elapsed_ms.toFixed(1)} ms`;
       document.getElementById('stat-layers').innerText = data.stats.layer_count;
+      document.getElementById('stat-print-time').innerText = data.stats.print_time_formatted || '-';
+      document.getElementById('stat-filament').innerText = `${(data.stats.filament_grams || 0).toFixed(1)}g (${(data.stats.filament_meters || 0).toFixed(1)}m)`;
       document.getElementById('stats-pill').style.display = 'flex';
 
       // Setup scrubber
@@ -620,6 +655,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       const colors = [];
 
       const colSkirt = new THREE.Color(0xa855f7); // Violet/Purple for skirt & brim
+      const colSupport = new THREE.Color(0x14b8a6); // Vibrant Teal/Seafoam for supports
       const colOuter = new THREE.Color(0x10b981); // Emerald green
       const colInner = new THREE.Color(0xf59e0b); // Amber
       const colInfill = new THREE.Color(0x06b6d4); // Cyan
@@ -639,6 +675,25 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
               positions.push(p1[0], p1[1], z, p2[0], p2[1], z);
               colors.push(colSkirt.r, colSkirt.g, colSkirt.b, colSkirt.r, colSkirt.g, colSkirt.b);
             }
+          }
+        }
+
+        // Supports
+        if (layer.supports) {
+          for (let poly of layer.supports) {
+            const n = poly.length;
+            for (let j = 0; j < n; j++) {
+              const p1 = poly[j];
+              const p2 = poly[(j + 1) % n];
+              positions.push(p1[0], p1[1], z, p2[0], p2[1], z);
+              colors.push(colSupport.r, colSupport.g, colSupport.b, colSupport.r, colSupport.g, colSupport.b);
+            }
+          }
+        }
+        if (layer.support_infill) {
+          for (let seg of layer.support_infill) {
+            positions.push(seg[0][0], seg[0][1], z, seg[1][0], seg[1][1], z);
+            colors.push(colSupport.r, colSupport.g, colSupport.b, colSupport.r, colSupport.g, colSupport.b);
           }
         }
 

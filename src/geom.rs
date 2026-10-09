@@ -223,4 +223,43 @@ impl Polygon2 {
         }
         inside
     }
+
+    pub fn min_distance_to_boundary(&self, pt: Point2) -> f64 {
+        let n = self.points.len();
+        if n == 0 {
+            return f64::MAX;
+        }
+        if n == 1 {
+            return pt.distance_to(self.points[0]);
+        }
+        let mut min_d = f64::MAX;
+        for i in 0..n {
+            let p1 = self.points[i];
+            let p2 = self.points[(i + 1) % n];
+            let v = p2 - p1;
+            let len_sq = v.x * v.x + v.y * v.y;
+            if len_sq < 1e-9 {
+                min_d = min_d.min(pt.distance_to(p1));
+                continue;
+            }
+            let t = ((pt.x - p1.x) * v.x + (pt.y - p1.y) * v.y) / len_sq;
+            let closest = if t <= 0.0 {
+                p1
+            } else if t >= 1.0 {
+                p2
+            } else {
+                Point2::new(p1.x + t * v.x, p1.y + t * v.y)
+            };
+            min_d = min_d.min(pt.distance_to(closest));
+        }
+        min_d
+    }
+
+    pub fn distance_to_solid(&self, pt: Point2) -> f64 {
+        if self.contains_point(pt) {
+            0.0
+        } else {
+            self.min_distance_to_boundary(pt)
+        }
+    }
 }

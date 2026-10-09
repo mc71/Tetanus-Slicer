@@ -1,6 +1,10 @@
 use std::io::{self, Write};
-use crate::geom::{Point2, Polygon2, Segment2};
+use serde::{Deserialize, Serialize};
 
+use crate::geom::{Point2, Polygon2, Segment2};
+use crate::infill::InfillPattern;
+
+#[derive(Clone, Copy, Debug)]
 pub struct PrintConfig {
     pub nozzle_temp: u32,
     pub bed_temp: u32,
@@ -21,6 +25,10 @@ pub struct PrintConfig {
     pub brim_width: f64,            // mm
     pub fan_speed: u8,              // 0-255 PWM
     pub fan_below_layer: usize,     // layer threshold where fan turns on
+    pub infill_pattern: InfillPattern,
+    pub support_enabled: bool,
+    pub support_angle: f64,         // degrees
+    pub support_density: f64,
 }
 
 impl Default for PrintConfig {
@@ -45,14 +53,29 @@ impl Default for PrintConfig {
             brim_width: 0.0,
             fan_speed: 255,
             fan_below_layer: 1,
+            infill_pattern: InfillPattern::Rectilinear,
+            support_enabled: false,
+            support_angle: 45.0,
+            support_density: 0.15,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PrintEstimates {
+    pub print_time_seconds: f64,
+    pub filament_used_mm: f64,
+    pub filament_used_grams: f64,
+    pub print_distance_mm: f64,
+    pub travel_distance_mm: f64,
 }
 
 pub struct ProcessedLayer {
     pub layer_index: usize,
     pub z: f64,
     pub skirt_brim: Vec<Polygon2>,
+    pub supports: Vec<Polygon2>,
+    pub support_infill: Vec<Segment2>,
     pub perimeters: Vec<Vec<Polygon2>>, // per-contour perimeter loops
     pub infill: Vec<Segment2>,
 }
@@ -62,6 +85,10 @@ pub struct GCodeWriter<'a> {
     current_pos: Point2,
     is_retracted: bool,
     filament_area: f64,
+    total_e: f64,
+    total_time_secs: f64,
+    total_print_dist_mm: f64,
+    total_travel_dist_mm: f64,
 }
 
 impl<'a> GCodeWriter<'a> {
@@ -73,6 +100,10 @@ impl<'a> GCodeWriter<'a> {
             current_pos: Point2::new(0.0, 0.0),
             is_retracted: false,
             filament_area,
+            total_e: 0.0,
+            total_time_secs: 0.0,
+            total_print_dist_mm: 0.0,
+            total_travel_dist_mm: 0.0,
         }
     }
 
@@ -80,15 +111,17 @@ impl<'a> GCodeWriter<'a> {
         &mut self,
         writer: &mut W,
         layers: &[ProcessedLayer],
-    ) -> io::Result<()> {
+    ) -> io::Result<PrintEstimates> {
         self.write_header(writer)?;
 
         for layer in layers {
             self.write_layer(writer, layer)?;
         }
 
-        self.write_footer(writer)?;
-        Ok(())
+        let estimates = self.compute_estimates();
+        self.write_footer(writer, &estimates)?;
+
+        Ok(estimates)
     }
 
     fn write_header<W: Write>(&mut self, w: &mut W) -> io::Result<()> {
@@ -110,6 +143,12 @@ impl<'a> GCodeWriter<'a> {
         writeln!(w, "G1 X100 Y10.5 F{}", self.config.travel_speed * 60.0)?;
         writeln!(w, "G1 X10 E16.0 F1200")?;
         writeln!(w, "G92 E0")?;
+
+        // Prime move stats
+        self.total_print_dist_mm += 180.0;
+        self.total_e += 24.0;
+        self.total_time_secs += 25.0; // purge time
+
         Ok(())
     }
 
@@ -131,6 +170,7 @@ impl<'a> GCodeWriter<'a> {
 
         // Layer move
         writeln!(w, "G1 Z{:.3} F{}", layer.z, self.config.travel_speed * 60.0)?;
+        self.total_time_secs += self.config.layer_height / 10.0; // Z move time
 
         let (perimeter_speed, infill_speed) = if layer.layer_index == 0 {
             (self.config.first_layer_speed, self.config.first_layer_speed)
@@ -138,31 +178,58 @@ impl<'a> GCodeWriter<'a> {
             (self.config.print_speed_perimeter, self.config.print_speed_infill)
         };
 
-        let perimeter_feedrate = perimeter_speed * 60.0;
         let infill_feedrate = infill_speed * 60.0;
 
         // 1. Skirt / Brim (Layer 0)
         if !layer.skirt_brim.is_empty() {
             writeln!(w, "; Skirt & Brim")?;
             for poly in &layer.skirt_brim {
-                self.trace_polygon(w, poly, perimeter_feedrate, layer.z)?;
+                self.trace_polygon(w, poly, perimeter_speed, layer.z)?;
             }
         }
 
-        // 2. Perimeters (Walls)
+        // 2. Supports
+        if !layer.supports.is_empty() {
+            writeln!(w, "; Supports")?;
+            for poly in &layer.supports {
+                self.trace_polygon(w, poly, perimeter_speed, layer.z)?;
+            }
+        }
+        if !layer.support_infill.is_empty() {
+            writeln!(w, "; Support Infill")?;
+            for seg in &layer.support_infill {
+                self.travel_to(w, seg.p1, layer.z)?;
+                let dist = seg.length();
+                let e = self.calculate_e(dist);
+                self.total_print_dist_mm += dist;
+                self.total_e += e;
+                self.total_time_secs += move_time(dist, infill_speed, 1200.0);
+                writeln!(
+                    w,
+                    "G1 X{:.3} Y{:.3} E{:.4} F{:.1}",
+                    seg.p2.x, seg.p2.y, e, infill_feedrate
+                )?;
+                self.current_pos = seg.p2;
+            }
+        }
+
+        // 3. Perimeters (Walls)
         for contour_perimeters in &layer.perimeters {
             for poly in contour_perimeters {
-                self.trace_polygon(w, poly, perimeter_feedrate, layer.z)?;
+                self.trace_polygon(w, poly, perimeter_speed, layer.z)?;
             }
         }
 
-        // 3. Infill
+        // 4. Infill
         if !layer.infill.is_empty() {
             writeln!(w, "; Infill")?;
             for seg in &layer.infill {
                 self.travel_to(w, seg.p1, layer.z)?;
                 let dist = seg.length();
                 let e = self.calculate_e(dist);
+                self.total_print_dist_mm += dist;
+                self.total_e += e;
+                self.total_time_secs += move_time(dist, infill_speed, 1200.0);
                 writeln!(
                     w,
                     "G1 X{:.3} Y{:.3} E{:.4} F{:.1}",
@@ -179,7 +246,7 @@ impl<'a> GCodeWriter<'a> {
         &mut self,
         w: &mut W,
         poly: &Polygon2,
-        feedrate: f64,
+        speed: f64,
         layer_z: f64,
     ) -> io::Result<()> {
         let n = poly.points.len();
@@ -188,11 +255,15 @@ impl<'a> GCodeWriter<'a> {
         }
 
         self.travel_to(w, poly.points[0], layer_z)?;
+        let feedrate = speed * 60.0;
 
         for i in 0..n {
             let next_pt = poly.points[(i + 1) % n];
             let dist = self.current_pos.distance_to(next_pt);
             let e = self.calculate_e(dist);
+            self.total_print_dist_mm += dist;
+            self.total_e += e;
+            self.total_time_secs += move_time(dist, speed, 1200.0);
             writeln!(
                 w,
                 "G1 X{:.3} Y{:.3} E{:.4} F{:.1}",
@@ -205,7 +276,8 @@ impl<'a> GCodeWriter<'a> {
     }
 
     fn travel_to<W: Write>(&mut self, w: &mut W, target: Point2, layer_z: f64) -> io::Result<()> {
-        if self.current_pos.distance_to(target) < 1e-4 {
+        let dist = self.current_pos.distance_to(target);
+        if dist < 1e-4 {
             return Ok(());
         }
 
@@ -217,6 +289,7 @@ impl<'a> GCodeWriter<'a> {
                 self.config.retract_dist,
                 self.config.retract_speed * 60.0
             )?;
+            self.total_time_secs += self.config.retract_dist / self.config.retract_speed;
             self.is_retracted = true;
 
             // Z-Hop lift
@@ -238,6 +311,8 @@ impl<'a> GCodeWriter<'a> {
             target.y,
             self.config.travel_speed * 60.0
         )?;
+        self.total_travel_dist_mm += dist;
+        self.total_time_secs += move_time(dist, self.config.travel_speed, 1500.0);
         self.current_pos = target;
 
         // Lower Z-Hop and unretract upon arrival
@@ -257,6 +332,7 @@ impl<'a> GCodeWriter<'a> {
                     self.config.retract_dist,
                     self.config.retract_speed * 60.0
                 )?;
+                self.total_time_secs += self.config.retract_dist / self.config.retract_speed;
             }
             self.is_retracted = false;
         }
@@ -269,7 +345,21 @@ impl<'a> GCodeWriter<'a> {
         bead_volume / self.filament_area
     }
 
-    fn write_footer<W: Write>(&mut self, w: &mut W) -> io::Result<()> {
+    fn compute_estimates(&self) -> PrintEstimates {
+        let filament_vol_mm3 = self.total_e * self.filament_area;
+        let filament_grams = filament_vol_mm3 * 0.00124; // PLA density ~1.24 g/cm3
+        let print_time_seconds = self.total_time_secs + 60.0; // 60s preheat buffer
+
+        PrintEstimates {
+            print_time_seconds,
+            filament_used_mm: self.total_e,
+            filament_used_grams: filament_grams,
+            print_distance_mm: self.total_print_dist_mm,
+            travel_distance_mm: self.total_travel_dist_mm,
+        }
+    }
+
+    fn write_footer<W: Write>(&mut self, w: &mut W, est: &PrintEstimates) -> io::Result<()> {
         writeln!(w, "\n; End G-code")?;
         writeln!(w, "M104 S0 ; turn off nozzle")?;
         writeln!(w, "M140 S0 ; turn off bed")?;
@@ -280,6 +370,30 @@ impl<'a> GCodeWriter<'a> {
         writeln!(w, "G90 ; absolute positioning")?;
         writeln!(w, "G28 X0 Y0 ; home X and Y")?;
         writeln!(w, "M84 ; disable motors")?;
+
+        let hours = (est.print_time_seconds / 3600.0).floor() as u64;
+        let mins = ((est.print_time_seconds % 3600.0) / 60.0).floor() as u64;
+        let secs = (est.print_time_seconds % 60.0).floor() as u64;
+        let meters = est.filament_used_mm / 1000.0;
+
+        writeln!(w, "\n; ============================================================")?;
+        writeln!(w, "; Print Statistics & Estimates")?;
+        writeln!(w, "; Estimated Print Time: {}h {}m {}s", hours, mins, secs)?;
+        writeln!(w, "; Filament Used: {:.2} m ({:.1} g)", meters, est.filament_used_grams)?;
+        writeln!(w, "; ============================================================")?;
+
         Ok(())
+    }
+}
+
+fn move_time(dist: f64, speed: f64, accel: f64) -> f64 {
+    if dist <= 1e-4 {
+        return 0.0;
+    }
+    let d_accel = (speed * speed) / (2.0 * accel);
+    if 2.0 * d_accel <= dist {
+        2.0 * (speed / accel) + (dist - 2.0 * d_accel) / speed
+    } else {
+        2.0 * (dist / accel).sqrt()
     }
 }

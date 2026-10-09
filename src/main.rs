@@ -5,6 +5,7 @@ mod infill;
 mod perimeter;
 mod slicer;
 mod stl;
+mod support;
 mod threemf;
 mod web;
 mod web_ui;
@@ -20,10 +21,11 @@ use rayon::prelude::*;
 use bvh::TriangleIntervalIndex;
 use gcode::{GCodeWriter, PrintConfig, ProcessedLayer};
 use geom::Polygon2;
-use infill::InfillGenerator;
+use infill::{InfillGenerator, InfillPattern};
 use perimeter::PerimeterGenerator;
 use slicer::{ContourRole, Slicer};
 use stl::Mesh;
+use support::{SupportConfig, SupportGenerator};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -76,6 +78,22 @@ fn main() {
                 perimeter_count = args[i + 1].parse().unwrap_or(2);
                 i += 1;
             }
+            "--infill-pattern" if i + 1 < args.len() => {
+                config.infill_pattern = match args[i + 1].to_lowercase().as_str() {
+                    "grid" => InfillPattern::Grid,
+                    "triangles" | "triangle" => InfillPattern::Triangles,
+                    "gyroid" => InfillPattern::Gyroid,
+                    _ => InfillPattern::Rectilinear,
+                };
+                i += 1;
+            }
+            "--support" | "--supports" => {
+                config.support_enabled = true;
+            }
+            "--support-angle" if i + 1 < args.len() => {
+                config.support_angle = args[i + 1].parse().unwrap_or(45.0);
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
@@ -84,23 +102,24 @@ fn main() {
     println!("============================================================");
     println!("           Tetanus-Slicer (High-Speed Slicing Engine)       ");
     println!("============================================================");
-    println!("Input STL:       {}", input_path);
+    println!("Input File:      {}", input_path);
     println!("Output G-code:   {}", output_path);
     println!("Layer Height:    {:.3} mm", config.layer_height);
     println!("Perimeters:      {}", perimeter_count);
-    println!("Infill Density:  {:.1}%", infill_density * 100.0);
+    println!("Infill Density:  {:.1}% ({:?})", infill_density * 100.0, config.infill_pattern);
+    println!("Supports:        {}", if config.support_enabled { format!("Enabled ({}° overhang)", config.support_angle) } else { "Disabled".to_string() });
     println!("Thread Pool:     {} threads (Rayon)", rayon::current_num_threads());
     println!("------------------------------------------------------------");
 
-    // 1. Load STL
+    // 1. Load Model (STL or 3MF)
     let t_start = Instant::now();
     let mesh = Mesh::load_stl(&input_path).unwrap_or_else(|e| {
-        eprintln!("Error loading STL: {}", e);
+        eprintln!("Error loading model: {}", e);
         std::process::exit(1);
     });
     let t_mesh = t_start.elapsed();
     println!(
-        "[1/4] Loaded STL in {:?}: {} triangles | Bounds: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
+        "[1/4] Loaded mesh in {:?}: {} triangles | Bounds: ({:.2}, {:.2}, {:.2}) to ({:.2}, {:.2}, {:.2})",
         t_mesh,
         mesh.triangles.len(),
         mesh.min_bound.x, mesh.min_bound.y, mesh.min_bound.z,
@@ -113,10 +132,10 @@ fn main() {
     let t_bvh = t_bvh_start.elapsed();
     println!("[2/4] Built spatial Z-index in {:?}", t_bvh);
 
-    // 3. Compute Layer Heights & Slice in Parallel with Rayon
+    // 3. Compute Layer Heights & Slice Contours in Parallel with Rayon
     let t_slice_start = Instant::now();
     let total_height = mesh.max_bound.z - mesh.min_bound.z;
-    let layer_count = (total_height / config.layer_height).ceil() as usize;
+    let layer_count = (total_height / config.layer_height).ceil().max(1.0) as usize;
 
     println!(
         "[3/4] Slicing {} layers in parallel across {} cores...",
@@ -125,30 +144,62 @@ fn main() {
     );
 
     let min_z = mesh.min_bound.z;
-    let layers: Vec<ProcessedLayer> = (0..layer_count)
+
+    // Step 3a: Parallel contour slicing
+    let layer_contours: Vec<Vec<slicer::ClassifiedContour>> = (0..layer_count)
         .into_par_iter()
         .map(|layer_idx| {
             let z = min_z + (layer_idx as f64 + 0.5) * config.layer_height;
-
-            // Query intersecting triangles
             let intersecting = bvh.query_z(z);
-
-            // Intersect triangles with Z plane
             let mut segments = Vec::with_capacity(intersecting.len());
             for tri in intersecting {
                 if let Some(seg) = Slicer::intersect_triangle(tri, z) {
                     segments.push(seg);
                 }
             }
+            Slicer::chain_segments(&segments)
+        })
+        .collect();
 
-            // Chain segments into closed contours with hole classification
-            let contours = Slicer::chain_segments(&segments);
+    // Step 3b: Support generation across layers if enabled
+    let support_data: Vec<(Vec<Polygon2>, Vec<geom::Segment2>)> = if config.support_enabled {
+        let layers_outer_polys: Vec<Vec<Polygon2>> = layer_contours
+            .iter()
+            .map(|contours| {
+                contours
+                    .iter()
+                    .filter(|c| c.role == ContourRole::Outer)
+                    .map(|c| c.polygon.clone())
+                    .collect()
+            })
+            .collect();
+
+        let sup_cfg = SupportConfig {
+            enabled: true,
+            overhang_angle: config.support_angle,
+            support_density: config.support_density,
+            line_width: config.line_width,
+            layer_height: config.layer_height,
+            xy_gap: 0.6,
+        };
+        SupportGenerator::generate_supports(&layers_outer_polys, &sup_cfg)
+    } else {
+        vec![(Vec::new(), Vec::new()); layer_count]
+    };
+
+    // Step 3c: Parallel toolpath generation (perimeters, infill, skirt/brim, supports)
+    let layers: Vec<ProcessedLayer> = (0..layer_count)
+        .into_par_iter()
+        .map(|layer_idx| {
+            let z = min_z + (layer_idx as f64 + 0.5) * config.layer_height;
+            let contours = &layer_contours[layer_idx];
+            let (supports, support_infill) = support_data[layer_idx].clone();
 
             // Generate perimeters & inner boundaries
             let mut perimeters = Vec::new();
             let mut infill_boundaries = Vec::new();
 
-            for contour in &contours {
+            for contour in contours {
                 let perim_loops = PerimeterGenerator::generate_perimeters(
                     &contour.polygon,
                     &contour.role,
@@ -195,20 +246,27 @@ fn main() {
             // Top and Bottom Solid Shells (100% rectilinear density)
             let is_solid = layer_idx < config.bottom_solid_layers
                 || layer_idx >= layer_count.saturating_sub(config.top_solid_layers);
-            let layer_infill_density = if is_solid { 1.0 } else { infill_density };
+            let (pattern, layer_infill_density) = if is_solid {
+                (InfillPattern::Rectilinear, 1.0)
+            } else {
+                (config.infill_pattern, infill_density)
+            };
 
-            // Generate infill across all boundaries with automatic hole exclusion
-            let infill = InfillGenerator::generate_rectilinear(
+            let infill = InfillGenerator::generate_infill(
+                pattern,
                 &infill_boundaries,
                 layer_infill_density,
                 config.line_width,
                 layer_idx,
+                z,
             );
 
             ProcessedLayer {
                 layer_index: layer_idx,
                 z,
                 skirt_brim,
+                supports,
+                support_infill,
                 perimeters,
                 infill,
             }
@@ -226,15 +284,22 @@ fn main() {
     });
     let mut writer = BufWriter::new(out_file);
     let mut gcode_writer = GCodeWriter::new(&config);
-    gcode_writer.write_gcode(&mut writer, &layers).unwrap();
+    let estimates = gcode_writer.write_gcode(&mut writer, &layers).unwrap();
     let t_gcode = t_gcode_start.elapsed();
 
     let total_time = t_start.elapsed();
+    let hours = (estimates.print_time_seconds / 3600.0).floor() as u64;
+    let mins = ((estimates.print_time_seconds % 3600.0) / 60.0).floor() as u64;
+    let secs = (estimates.print_time_seconds % 60.0).floor() as u64;
+    let meters = estimates.filament_used_mm / 1000.0;
+
     println!("[4/4] G-code written in {:?}", t_gcode);
     println!("------------------------------------------------------------");
     println!("✓ Slicing Finished Successfully!");
     println!("  Total Elapsed Time: {:?}", total_time);
     println!("  Throughput:         {:.1} layers/sec", layer_count as f64 / total_time.as_secs_f64());
+    println!("  Est. Print Time:    {}h {}m {}s", hours, mins, secs);
+    println!("  Filament Used:      {:.2} m ({:.1} g)", meters, estimates.filament_used_grams);
     println!("  Generated:          {}", output_path);
     println!("============================================================");
 }
@@ -246,22 +311,16 @@ fn generate_test_cube_stl(path: &str) -> std::io::Result<()> {
 
     let size = 20.0;
     let faces = [
-        // Front (Z from 0 to size, Y = 0)
         ([0.0, 0.0, 0.0], [size, 0.0, 0.0], [size, 0.0, size]),
         ([0.0, 0.0, 0.0], [size, 0.0, size], [0.0, 0.0, size]),
-        // Back (Y = size)
         ([size, size, 0.0], [0.0, size, 0.0], [0.0, size, size]),
         ([size, size, 0.0], [0.0, size, size], [size, size, size]),
-        // Left (X = 0)
         ([0.0, size, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, size]),
         ([0.0, size, 0.0], [0.0, 0.0, size], [0.0, size, size]),
-        // Right (X = size)
         ([size, 0.0, 0.0], [size, size, 0.0], [size, size, size]),
         ([size, 0.0, 0.0], [size, size, size], [size, 0.0, size]),
-        // Bottom (Z = 0)
         ([0.0, size, 0.0], [size, size, 0.0], [size, 0.0, 0.0]),
         ([0.0, size, 0.0], [size, 0.0, 0.0], [0.0, 0.0, 0.0]),
-        // Top (Z = size)
         ([0.0, 0.0, size], [size, 0.0, size], [size, size, size]),
         ([0.0, 0.0, size], [size, size, size], [0.0, size, size]),
     ];
