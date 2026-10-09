@@ -252,33 +252,32 @@ fn handle_slice_request(req: SliceRequest) -> SliceResponse {
                 }
             }
 
-            let contours = Slicer::chain_segments(&segments, 1e-4);
+            let contours = Slicer::chain_segments(&segments);
 
             let mut perimeters = Vec::new();
-            let mut inner_boundaries = Vec::new();
+            let mut infill_boundaries = Vec::new();
 
             for contour in &contours {
                 let perim_loops = PerimeterGenerator::generate_perimeters(
-                    contour,
+                    &contour.polygon,
+                    &contour.role,
                     req.perimeters,
                     config.line_width,
                 );
                 if let Some(innermost) = perim_loops.last() {
-                    inner_boundaries.push(innermost.clone());
+                    infill_boundaries.push(innermost.clone());
+                } else {
+                    infill_boundaries.push(contour.polygon.clone());
                 }
                 perimeters.push(perim_loops);
             }
 
-            let mut infill = Vec::new();
-            for inner in &inner_boundaries {
-                let infill_segs = InfillGenerator::generate_rectilinear(
-                    inner,
-                    req.infill_density,
-                    config.line_width,
-                    layer_idx,
-                );
-                infill.extend(infill_segs);
-            }
+            let infill = InfillGenerator::generate_rectilinear(
+                &infill_boundaries,
+                req.infill_density,
+                config.line_width,
+                layer_idx,
+            );
 
             ProcessedLayer {
                 layer_index: layer_idx,

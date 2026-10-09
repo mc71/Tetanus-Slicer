@@ -139,36 +139,35 @@ fn main() {
                 }
             }
 
-            // Chain segments into closed contours
-            let contours = Slicer::chain_segments(&segments, 1e-4);
+            // Chain segments into closed contours with hole classification
+            let contours = Slicer::chain_segments(&segments);
 
             // Generate perimeters & inner boundaries
             let mut perimeters = Vec::new();
-            let mut inner_boundaries = Vec::new();
+            let mut infill_boundaries = Vec::new();
 
             for contour in &contours {
                 let perim_loops = PerimeterGenerator::generate_perimeters(
-                    contour,
+                    &contour.polygon,
+                    &contour.role,
                     perimeter_count,
                     config.line_width,
                 );
                 if let Some(innermost) = perim_loops.last() {
-                    inner_boundaries.push(innermost.clone());
+                    infill_boundaries.push(innermost.clone());
+                } else {
+                    infill_boundaries.push(contour.polygon.clone());
                 }
                 perimeters.push(perim_loops);
             }
 
-            // Generate infill for inner regions
-            let mut infill = Vec::new();
-            for inner in &inner_boundaries {
-                let infill_segs = InfillGenerator::generate_rectilinear(
-                    inner,
-                    infill_density,
-                    config.line_width,
-                    layer_idx,
-                );
-                infill.extend(infill_segs);
-            }
+            // Generate infill across all boundaries with automatic hole exclusion
+            let infill = InfillGenerator::generate_rectilinear(
+                &infill_boundaries,
+                infill_density,
+                config.line_width,
+                layer_idx,
+            );
 
             ProcessedLayer {
                 layer_index: layer_idx,
