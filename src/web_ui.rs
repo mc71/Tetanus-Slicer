@@ -3,7 +3,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tetanus Slicer | High-Speed Rust 3D Slicing Engine</title>
+  <title>Tetanus Slicer</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -43,8 +43,11 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       position: absolute; top: 72px; left: 20px; width: 330px; max-height: calc(100vh - 92px);
       background: var(--panel); backdrop-filter: blur(16px);
       border: 1px solid var(--panel-border); border-radius: 14px;
-      padding: 20px; z-index: 10; display: flex; flex-direction: column; gap: 16px;
+      padding: 16px; z-index: 10; display: flex; flex-direction: column; gap: 10px;
       overflow-y: auto; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    }
+    #sidebar > * {
+      flex-shrink: 0;
     }
     #sidebar::-webkit-scrollbar { width: 6px; }
     #sidebar::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
@@ -90,34 +93,51 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     #slice-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(249, 115, 22, 0.5); }
     #slice-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
-    /* Bottom Layer Scrubber (Visible after slice) */
-    #scrubber-panel {
-      display: none; position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
-      width: min(650px, 90vw); background: var(--panel); backdrop-filter: blur(16px);
-      border: 1px solid var(--panel-border); border-radius: 14px; padding: 14px 20px;
-      z-index: 10; flex-direction: column; gap: 10px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    /* Top-Right Ghosted Information Panel & Legend (Blends with background) */
+    .stats-hud {
+      display: none; position: absolute; top: 72px; right: 24px; width: 280px;
+      background: rgba(10, 15, 29, 0.55); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(51, 65, 85, 0.45); border-radius: 14px; padding: 16px 18px;
+      z-index: 10; box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+      flex-direction: column; gap: 12px; transition: opacity 0.3s ease;
     }
-    .scrubber-header { display: flex; align-items: center; justify-content: space-between; }
-    .layer-badge { font-family: monospace; font-size: 13px; font-weight: 700; color: var(--accent); }
-    .scrubber-controls { display: flex; align-items: center; gap: 12px; }
+    .hud-header { display: flex; align-items: center; justify-content: space-between; }
+    .hud-title { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; color: var(--accent); }
+    .hud-badge { font-family: monospace; font-size: 10px; font-weight: 700; background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); padding: 2px 7px; border-radius: 10px; }
+    .hud-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+    .hud-stat { display: flex; flex-direction: column; gap: 2px; }
+    .hud-label { font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .hud-val { font-family: monospace; font-size: 13px; font-weight: 700; color: var(--text); }
+    .hud-val.highlight { color: #38bdf8; }
+    .hud-divider { height: 1px; background: rgba(51, 65, 85, 0.45); margin: 2px 0; }
+    .hud-section-title { font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
+    .hud-legend { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: #cbd5e1; }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+    /* Left Panel Layer Navigation & Full Download Button */
+    .download-btn-full {
+      background: linear-gradient(135deg, #059669, #10b981);
+      color: white; border: none; padding: 12px; border-radius: 10px;
+      font-size: 13px; font-weight: 700; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35);
+      transition: all 0.2s ease;
+    }
+    .download-btn-full:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(16, 185, 129, 0.5); }
+
+    .layer-badge { font-family: monospace; font-size: 12px; font-weight: 700; color: var(--accent); }
     .btn-icon {
-      background: #334155; color: white; border: none; width: 32px; height: 32px;
+      background: #334155; color: white; border: none; width: 30px; height: 30px;
       border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center;
       transition: background 0.15s ease;
     }
     .btn-icon:hover { background: #475569; }
-    .toggles { display: flex; gap: 14px; font-size: 11px; color: var(--text-muted); align-items: center; }
-    .toggles label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
-    .download-btn {
-      background: #10b981; color: white; border: none; padding: 6px 14px; border-radius: 7px;
-      font-size: 12px; font-weight: 700; cursor: pointer; transition: background 0.15s ease;
-    }
-    .download-btn:hover { background: #059669; }
+    .toggles { display: flex; gap: 10px; font-size: 11px; color: var(--text-muted); align-items: center; }
+    .toggles label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
 
-    /* Legend */
-    .legend { display: flex; gap: 12px; font-size: 11px; margin-top: 2px; }
-    .legend-item { display: flex; align-items: center; gap: 4px; }
-    .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+    /* Model transformations hidden per user instruction */
+    #group-model-tools { display: none !important; }
 
     /* Model Tool Buttons & Place on Face Banner */
     .tool-btn {
@@ -161,14 +181,19 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       border: 1px solid var(--panel-border);
       border-radius: 10px;
       overflow: hidden;
-      margin-bottom: 4px;
+      flex-shrink: 0;
+      width: 100%;
+      box-sizing: border-box;
       transition: border-color 0.15s ease;
     }
     .settings-group[open] {
       border-color: rgba(249, 115, 22, 0.35);
     }
     .settings-group summary {
-      padding: 9px 12px;
+      padding: 10px 12px;
+      min-height: 38px;
+      box-sizing: border-box;
+      line-height: 18px;
       font-size: 11px;
       font-weight: 700;
       color: var(--text);
@@ -219,15 +244,6 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <header>
     <div class="logo">
       <span>TETANUS SLICER</span>
-      <span class="logo-badge">Rust Engine</span>
-      <span class="tagline">High-Performance 3D Slicing</span>
-    </div>
-    <div id="stats-pill" class="stats-pill">
-      <span>⚡ Sliced in <b id="stat-time">0 ms</b> (<b id="stat-layers">0</b> layers)</span>
-      <span style="opacity:0.35">|</span>
-      <span>⏱️ Est. <b id="stat-print-time">0m</b></span>
-      <span style="opacity:0.35">|</span>
-      <span>🧵 <b id="stat-filament">0g</b></span>
     </div>
   </header>
 
@@ -238,6 +254,44 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
   </div>
 
   <div id="canvas-container"></div>
+
+  <!-- Top-Right Ghosted Information Panel & Toolpath Legend (Blends with background) -->
+  <div id="stats-hud" class="stats-hud">
+    <div class="hud-header">
+      <span class="hud-title">⚡ Print Statistics</span>
+      <span class="hud-badge" id="hud-badge">Ready</span>
+    </div>
+    <div class="hud-grid">
+      <div class="hud-stat">
+        <span class="hud-label">Slice Time</span>
+        <span class="hud-val" id="stat-time">0 ms</span>
+      </div>
+      <div class="hud-stat">
+        <span class="hud-label">Layers</span>
+        <span class="hud-val" id="stat-layers">0</span>
+      </div>
+      <div class="hud-stat">
+        <span class="hud-label">Est. Print Time</span>
+        <span class="hud-val highlight" id="stat-print-time">0m</span>
+      </div>
+      <div class="hud-stat">
+        <span class="hud-label">Filament Weight</span>
+        <span class="hud-val" id="stat-filament">0.0g</span>
+      </div>
+    </div>
+
+    <div class="hud-divider"></div>
+
+    <div class="hud-section-title">Toolpath Legend</div>
+    <div class="hud-legend">
+      <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div> Skirt / Brim</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#14b8a6"></div> Support Structure</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Outer Perimeter</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Inner Perimeter</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#06b6d4"></div> Infill Pattern</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ffffff; box-shadow:0 0 6px #fff;"></div> Z Seam Alignment</div>
+    </div>
+  </div>
 
   <!-- Sidebar -->
   <aside id="sidebar">
@@ -442,34 +496,25 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <span class="spinner" id="slice-spinner"></span>
       <span id="slice-btn-text">⚡ Slice Model</span>
     </button>
-  </aside>
 
-  <!-- Bottom Layer Scrubber -->
-  <div id="scrubber-panel">
-    <div class="scrubber-header">
-      <div class="layer-badge" id="layer-badge">Layer 1 / 100 (Z = 0.20 mm)</div>
-      <div class="scrubber-controls">
-        <button class="btn-icon" id="btn-play" title="Auto play layers">▶</button>
-        <button class="download-btn" id="btn-download">💾 Download .gcode</button>
+    <!-- Layer Navigation & G-Code Download in Left Sidebar -->
+    <div id="layer-scrubber-panel" style="display:none; flex-direction:column; gap:10px; margin-top:2px;">
+      <button class="download-btn-full" id="btn-download">💾 Download .gcode</button>
+
+      <div class="field" style="background:rgba(30,41,59,0.35); border:1px solid var(--panel-border); border-radius:10px; padding:12px;">
+        <div class="field-header" style="margin-bottom:6px;">
+          <span class="layer-badge" id="layer-badge">Layer 1 / 100</span>
+          <button class="btn-icon" id="btn-play" title="Auto play layers" style="width:28px; height:28px; font-size:12px;">▶</button>
+        </div>
+        <input type="range" id="layer-slider" min="1" max="100" value="100" style="margin-bottom:8px;">
+        <div class="toggles" style="justify-content:space-between; font-size:11px;">
+          <label><input type="checkbox" id="chk-show-mesh" checked> Mesh</label>
+          <label><input type="checkbox" id="chk-show-seams" checked> Seams</label>
+          <label><input type="checkbox" id="chk-accumulate" checked> Build Up</label>
+        </div>
       </div>
     </div>
-    <input type="range" id="layer-slider" min="1" max="100" value="100">
-    <div class="scrubber-header">
-      <div class="legend">
-        <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div> Skirt/Brim</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#14b8a6"></div> Support</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> Outer Wall</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div> Inner Wall</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#06b6d4"></div> Infill</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#ffffff; box-shadow:0 0 6px #fff;"></div> Seam</div>
-      </div>
-      <div class="toggles">
-        <label><input type="checkbox" id="chk-show-mesh" checked> Show Mesh</label>
-        <label><input type="checkbox" id="chk-show-seams" checked> Seams</label>
-        <label><input type="checkbox" id="chk-accumulate" checked> Build Up</label>
-      </div>
-    </div>
-  </div>
+  </aside>
 
   <script>
     // --- State ---
@@ -766,8 +811,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (valCopies) valCopies.innerText = `${additionalModelsBase64.length + 1} copy`;
       const modelTools = document.getElementById('group-model-tools') || document.getElementById('model-tools');
       if (modelTools) {
-        modelTools.style.display = 'block';
-        if ('open' in modelTools) modelTools.open = true;
+        modelTools.style.display = 'none'; // Kept in DOM but hidden per user request
       }
 
       // Update UI Info
@@ -777,8 +821,10 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
       // Clear previous toolpaths
       clearToolpaths();
-      document.getElementById('scrubber-panel').style.display = 'none';
-      document.getElementById('stats-pill').style.display = 'none';
+      const layerPanel = document.getElementById('layer-scrubber-panel');
+      if (layerPanel) layerPanel.style.display = 'none';
+      const statsHud = document.getElementById('stats-hud');
+      if (statsHud) statsHud.style.display = 'none';
     }
 
     // --- Client-side STL Parser & Renderer ---
@@ -1306,7 +1352,7 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
     });
 
     function onSliceSuccess(data) {
-      // Update stats pill
+      // Update top-right ghosted HUD statistics
       document.getElementById('stat-time').innerText = `${data.stats.elapsed_ms.toFixed(1)} ms`;
       document.getElementById('stat-layers').innerText = data.stats.layer_count;
       document.getElementById('stat-print-time').innerText = data.stats.print_time_formatted || '-';
@@ -1314,21 +1360,23 @@ pub const INDEX_HTML: &str = r#"<!DOCTYPE html>
       if (statFilament && data.stats) {
         statFilament.innerText = `${data.stats.filament_grams.toFixed(1)}g (${data.stats.filament_meters.toFixed(1)}m)`;
       }
-      document.getElementById('stats-pill').style.display = 'flex';
+      const statsHud = document.getElementById('stats-hud');
+      if (statsHud) statsHud.style.display = 'flex';
 
       // Update build plate size if provided
       if (data.bed_size && (data.bed_size[0] !== currentBedX || data.bed_size[1] !== currentBedY)) {
         updateBuildPlate(data.bed_size[0], data.bed_size[1]);
       }
 
-      // Setup scrubber
+      // Setup left sidebar scrubber
       const slider = document.getElementById('layer-slider');
       const wasAtTop = !slider.max || parseInt(slider.value) >= parseInt(slider.max);
       const prevVal = parseInt(slider.value) || data.layers.length;
       slider.min = 1;
       slider.max = data.layers.length;
       slider.value = wasAtTop ? data.layers.length : Math.min(prevVal, data.layers.length);
-      document.getElementById('scrubber-panel').style.display = 'flex';
+      const layerPanel = document.getElementById('layer-scrubber-panel');
+      if (layerPanel) layerPanel.style.display = 'flex';
 
       // Mesh transparency
       if (loadedMesh) loadedMesh.material.opacity = 0.25;

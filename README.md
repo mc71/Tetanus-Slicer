@@ -1,50 +1,106 @@
-# Tetanus-Slicer
+# Tetanus Slicer
 
-A standalone, high-performance 3D slicing engine written in pure Rust.
+A high-performance, multi-threaded 3D slicing engine and interactive Web GUI written in pure Rust.
 
-## Features & Architecture
+![Tetanus Slicer Web UI](assets/tetanus_slicer_ui.png)
 
-* **Multi-threaded Slicing Engine**: Every layer is computed in parallel across all CPU cores using `rayon`.
-* **Spatial Z-Interval Index**: Reduces triangle-plane intersection queries from $O(N \times L)$ to $O(\log N + K)$.
-* **Binary & ASCII STL and 3MF Support**: Fast native loading with automatic unit scaling (meter, cm, inch, mm) and bounds calculation.
-* **Segment Chaining**: Reconstructs closed 2D polygon loops from unordered triangle intersection segments.
-* **Perimeter Generation**: Concentric polygon insetting with miter clamping for shell generation.
-* **Rectilinear Infill**: Alternating 45° and 135° scanline ray-casting for solid interior infill.
-* **Volumetric G-code Generation**: Computes exact extrusion lengths ($E$-axis) based on bead geometry and $1.75\,\text{mm}$ filament diameter, with automatic retractions, travel moves, bed/nozzle temperature staging, and homing.
+---
+
+## Highlights & Capabilities
+
+* **Multi-Threaded Rayon Architecture**: Slices layers concurrently across all CPU threads with near-instant slice times (e.g., standard 3DBenchy slices in ~600 ms).
+* **Spatial Z-Interval Acceleration**: Reduces triangle-plane intersection queries from $\mathcal{O}(N \times L)$ to $\mathcal{O}(\log N + K)$.
+* **Native STL & 3MF Parser**: Supports both ASCII and Binary STL as well as compressed 3MF formats with automatic unit normalization and bounds detection.
+* **Modern Web GUI & 3D Viewport**:
+  * Clean Three.js orbital 3D workspace with dark theme and build plate grid.
+  * Drag-and-drop file ingestion supporting single and multi-model build plate layouts.
+  * Real-time automatic background slicing upon model drop or setting changes with debounce.
+  * Top-right ghosted **Print Statistics HUD** with live slice duration, total layers, estimated print time, and filament weight (grams & length).
+  * Color-coded **Toolpath Legend**:
+    * 🟣 Skirt / Brim
+    * 🟢 Outer Perimeter
+    * 🟠 Inner Perimeter
+    * 🔷 Infill (Rectilinear, Grid, Triangles, Gyroid)
+    * 🔹 Support Structure
+    * ⚪ Z-Seam alignment indicators
+  * Interactive layer scrubber with single-layer isolator, accumulated buildup mode, and playback controls.
+  * One-click `.gcode` export.
+* **Advanced Infill Patterns**:
+  * **Rectilinear**: Alternating 45°/135° scanlines.
+  * **Grid**: Bi-directional crosshatch grid.
+  * **Triangles**: Isotropic rigidity infill.
+  * **3D Gyroid**: Continuous sinusoidal non-planar infill with progressive Z-axis phase evolution.
+* **Specialized Print Modes**:
+  * **Spiral Vase Mode**: Seamless continuous single-wall spiralized outer perimeter with zero seams.
+  * **Adaptive Layer Heights**: Slope-aware layer thickness (0.08 mm to 0.28 mm) for optimal curved surface fidelity and fast vertical walls.
+  * **Z-Seam Management**: Aligned (convex corner optimization), Rear (+Y bed), Nearest (minimal travel), and Random.
+  * **Overhang Supports**: Automatic overhang angle detection and dedicated support toolpath generation.
+* **Machine & Material Profiles**: Cascading profile architecture with presets for printers (e.g. Bambu Lab A1, Generic Cartesian) and materials (PLA, PETG).
+
+---
 
 ## Quick Start
+
+### Prerequisites
+* Rust toolchain (1.70+ recommended): `cargo`
 
 ### Build
 ```bash
 cargo build --release
 ```
 
-### Web GUI Mode (Interactive 3D Viewport)
-Launch the embedded web server and open the interactive 3D slicer in your browser:
+### Web GUI Mode (Interactive 3D Slicer)
+Run the built-in web server:
 ```bash
 ./target/release/tetanus-slicer --web
 ```
-Then navigate to **`http://localhost:8080`**.
-* **3D Build Plate**: 220 × 220 mm bed grid with orbit/zoom controls.
-* **Drag-and-Drop STL & 3MF**: Drop any `.stl` or `.3mf` file onto the viewport for instant 3D rendering.
-* **Instant Slicing**: Slices models in milliseconds powered by the native multi-core Rust engine.
-* **Interactive Toolpath Scrubber**: Scrub through layers, inspect color-coded outer walls, inner walls, and infill, and auto-play the print buildup.
-* **One-Click G-code Export**: Download the sliced `.gcode` file ready for printing.
+Or specify a custom port:
+```bash
+./target/release/tetanus-slicer --web --port 8080
+```
+Open **`http://localhost:8080`** in your browser. Drag and drop any `.stl` or `.3mf` file directly into the viewport to begin slicing!
+
+---
 
 ### CLI Mode
-Slice an STL or 3MF file directly from the terminal:
+
+Slice directly from the command line:
 ```bash
-./target/release/tetanus-slicer path/to/model.3mf output.gcode --layer-height 0.2 --perimeters 2 --infill 0.20
+./target/release/tetanus-slicer path/to/model.stl output.gcode \
+  --layer-height 0.20 \
+  --perimeters 2 \
+  --infill 0.15 \
+  --infill-pattern gyroid \
+  --machine bambu_a1 \
+  --filament pla
 ```
 
-If run without arguments, it generates a `cube.stl` calibration cube and slices it:
+If run without arguments, it generates a calibration cube and slices it automatically:
 ```bash
 ./target/release/tetanus-slicer
 ```
 
-### CLI Options
-* `--web` / `-w`: Start the embedded interactive Web GUI server
-* `--port <n>`: Port for the web server (default: `8080`)
-* `--layer-height <mm>`: Layer thickness (default: `0.20`)
-* `--perimeters <n>`: Number of wall shells (default: `2`)
-* `--infill <float>`: Infill ratio between 0.0 and 1.0 (default: `0.20` for 20%)
+---
+
+## CLI Options
+
+| Flag / Option | Description | Default |
+|---|---|---|
+| `-w`, `--web` | Launch the embedded interactive Web GUI server | `false` |
+| `--port <n>` | Port for the Web GUI server | `8080` |
+| `--layer-height <mm>` | Primary layer height | `0.20` |
+| `--perimeters <n>` | Number of perimeter shells | `2` |
+| `--infill <float>` | Infill density ratio (0.0 to 1.0) | `0.20` |
+| `--infill-pattern <name>` | Infill type (`rectilinear`, `grid`, `triangles`, `gyroid`) | `rectilinear` |
+| `--machine <name>` | Machine profile (`bambu_a1`, `generic_cartesian`) | `bambu_a1` |
+| `--filament <name>` | Filament profile (`pla`, `petg`) | `pla` |
+| `--spiral-vase` | Enable spiral vase mode | `false` |
+| `--adaptive-layers` | Enable slope-dependent adaptive layer heights | `false` |
+| `--support` | Enable overhang support structure generation | `false` |
+| `--support-angle <deg>` | Overhang threshold angle | `45` |
+
+---
+
+## License
+
+MIT / Apache-2.0
